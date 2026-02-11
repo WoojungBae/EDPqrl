@@ -241,7 +241,8 @@ N = 500
   }
   # Plot the density of all found intercepts
   plot(density(all_intercepts), main="Posterior Density of Intercepts",
-       xlim = c(-7, 7),xlab="Intercept Value", lwd=2, col="blue")
+       xlim = c(-7, 7), xlab="Intercept Value", lwd=2, col="blue");par(new=T)
+  plot(density(temp_data$logY), main="", xlim = c(-7, 7))
   abline(v=c(-3.0, -0.5, 2.0), col="red", lty=2, lwd=2)
   legend("topright", legend=c("Posterior", "Truth"), col=c("blue", "red"), lty=c(1,2))
 
