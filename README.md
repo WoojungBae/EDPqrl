@@ -1,7 +1,7 @@
 EDPqrl
 ================
 
-This is the source/analysis code for "A Bayesian nonparametric qpproach to 
+This is the source/analysis code for "A Bayesian nonparametric approach to 
 causal inference on quantile residual life in observational studies."
 
 ## Reference 

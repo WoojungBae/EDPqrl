@@ -818,7 +818,7 @@ double S_DPMM_cpp(double const& y, vec const& lambda,
 }
 
 // [[Rcpp::export]]
-List S_optim_cpp(double const& target, double const& log_nu,// target = {S(nu)} * {1-rho}
+List S_optim_cpp(double const& target, double const& log_nu, // target = {S(nu)} * {1-rho}
                  double const& y_init, double const& y_min, double const& y_max,
                  vec const& lambda, vec const& Ymu, vec const& Ysig,
                  bool const& logt){
@@ -878,6 +878,244 @@ List S_optim_cpp(double const& target, double const& log_nu,// target = {S(nu)} 
     y_star = y_init; 
     S_m = -999.0;
     step = -0.1;
+    it = -1;
+  }
+  
+  return List::create(_["optimizer"] = y_star,
+                      _["S_star"] = S_m,
+                      _["step"] = step,
+                      _["it"] = it,
+                      _["maxit"] = maxit,
+                      _["tol"] = tol);
+}
+
+// [[Rcpp::export]]
+double f_cond_cpp(double const& y, 
+                  mat const& lambda_mat, 
+                  mat const& mu_mat, 
+                  vec const& sig,
+                  bool const& logt) {
+  int M = lambda_mat.n_rows;
+  int K = lambda_mat.n_cols;
+  
+  arma::vec subj_f(M);
+  
+  // Double loop is heavily optimized in C++
+  for (int i = 0; i < M; ++i) {
+    if (logt) {
+      arma::vec log_terms(K);
+      for (int k = 0; k < K; ++k) {
+        // FIXED: Passing y, mu, and sig directly applies the 1/sigma scale correctly
+        double log_f_k = R::dnorm(y, mu_mat(i, k), sig(k), true); 
+        log_terms(k) = std::log(lambda_mat(i, k)) + log_f_k;
+      }
+      double max_val = log_terms.max();
+      subj_f(i) = max_val + std::log(sum(exp(log_terms - max_val)));
+    } else {
+      double prob_sum = 0.0;
+      for (int k = 0; k < K; ++k) {
+        double f_k = R::dnorm(y, mu_mat(i, k), sig(k), false); 
+        prob_sum += lambda_mat(i, k) * f_k;
+      }
+      subj_f(i) = prob_sum;
+    }
+  }
+  
+  // Marginalize over M subjects
+  if (logt) {
+    double max_f = subj_f.max();
+    return max_f + std::log(sum(exp(subj_f - max_f)) / M);
+  } else {
+    return mean(subj_f);
+  }
+}
+
+// [[Rcpp::export]]
+double S_cond_cpp(double const& y, 
+                  mat const& lambda_mat, 
+                  mat const& mu_mat, 
+                  vec const& sig,
+                  bool const& logt) {
+  int M = lambda_mat.n_rows;
+  int K = lambda_mat.n_cols;
+  
+  vec subj_S(M);
+  
+  for (int i = 0; i < M; ++i) {
+    if (logt) {
+      vec log_terms(K);
+      for (int k = 0; k < K; ++k) {
+        double z = (y - mu_mat(i, k)) / sig(k);
+        double log_S_k = R::pnorm(z, 0.0, 1.0, false, true); 
+        log_terms(k) = std::log(lambda_mat(i, k)) + log_S_k;
+      }
+      
+      double max_val = log_terms.max();
+      // FIX: Prevent NaN when tail probability hits -Inf
+      if (std::isinf(max_val) || std::isnan(max_val)) {
+        subj_S(i) = -INFINITY;
+      } else {
+        subj_S(i) = max_val + std::log(sum(exp(log_terms - max_val)));
+      }
+      
+    } else {
+      double prob_sum = 0.0;
+      for (int k = 0; k < K; ++k) {
+        double z = (y - mu_mat(i, k)) / sig(k);
+        double S_k = R::pnorm(z, 0.0, 1.0, false, false); 
+        prob_sum += lambda_mat(i, k) * S_k;
+      }
+      subj_S(i) = prob_sum;
+    }
+  }
+  
+  if (logt) {
+    double max_S = subj_S.max();
+    // FIX: Safe marginalization over M subjects
+    if (std::isinf(max_S) || std::isnan(max_S)) {
+      return -INFINITY;
+    } else {
+      return max_S + std::log(sum(exp(subj_S - max_S)) / M);
+    }
+  } else {
+    return mean(subj_S);
+  }
+}
+
+// [[Rcpp::export]]
+arma::vec S_cond_cpp_vec(double const& y, 
+                         mat const& lambda_mat, 
+                         mat const& mu_mat, 
+                         vec const& sig,
+                         bool const& logt) {
+  int M = lambda_mat.n_rows;
+  int K = lambda_mat.n_cols;
+  
+  vec subj_S(M);
+  
+  for (int i = 0; i < M; ++i) {
+    if (logt) {
+      vec log_terms(K);
+      for (int k = 0; k < K; ++k) {
+        double z = (y - mu_mat(i, k)) / sig(k);
+        // lower.tail=false (Survival), log.p=true
+        double log_S_k = R::pnorm(z, 0.0, 1.0, false, true); 
+        log_terms(k) = std::log(lambda_mat(i, k)) + log_S_k;
+      }
+      double max_val = log_terms.max();
+      subj_S(i) = max_val + std::log(sum(exp(log_terms - max_val)));
+    } else {
+      double prob_sum = 0.0;
+      for (int k = 0; k < K; ++k) {
+        double z = (y - mu_mat(i, k)) / sig(k);
+        double S_k = R::pnorm(z, 0.0, 1.0, false, false); 
+        prob_sum += lambda_mat(i, k) * S_k;
+      }
+      subj_S(i) = prob_sum;
+    }
+  }
+  
+  // Return the vector of M subjects directly
+  // Do NOT marginalize/average here if you want PPI or individual lines
+  return (logt) ? subj_S : subj_S; 
+}
+
+// [[Rcpp::export]]
+arma::vec f_cond_cpp_vec(double const& y, 
+                         mat const& lambda_mat, 
+                         mat const& mu_mat, 
+                         vec const& sig,
+                         bool const& logt) {
+  int M = lambda_mat.n_rows;
+  int K = lambda_mat.n_cols;
+  
+  vec subj_f(M);
+  
+  for (int i = 0; i < M; ++i) {
+    if (logt) {
+      vec log_terms(K);
+      for (int k = 0; k < K; ++k) {
+        // Correct density calculation with 1/sigma scaling
+        double log_f_k = R::dnorm(y, mu_mat(i, k), sig(k), true); 
+        log_terms(k) = std::log(lambda_mat(i, k)) + log_f_k;
+      }
+      double max_val = log_terms.max();
+      subj_f(i) = max_val + std::log(sum(exp(log_terms - max_val)));
+    } else {
+      double prob_sum = 0.0;
+      for (int k = 0; k < K; ++k) {
+        double f_k = R::dnorm(y, mu_mat(i, k), sig(k), false); 
+        prob_sum += lambda_mat(i, k) * f_k;
+      }
+      subj_f(i) = prob_sum;
+    }
+  }
+  
+  return subj_f;
+}
+
+// [[Rcpp::export]]
+List S_optim_cond_cpp(double const& target, 
+                      double const& y_init, double const& y_min, double const& y_max,
+                      mat const& lambda_mat, mat const& mu_mat, vec const& sig,
+                      bool const& logt) {
+  double y_star = y_init;
+  double y_m    = 0.0;
+  double S_m    = 0.0;
+  double step   = 0.0;
+  
+  // FIX: Start search from y_init rather than jumping to extremes
+  double y_u = y_init;
+  double y_l = std::max(y_min, -100.0);
+  
+  double S_u = S_cond_cpp(y_u, lambda_mat, mu_mat, sig, logt);
+  double S_l = S_cond_cpp(y_l, lambda_mat, mu_mat, sig, logt);
+  
+  bool cond; int it; int maxit = 1e5; double tol = (logt) ? 1e-4 : 1e-8;
+  
+  // Step UP to find the upper bound
+  cond = (S_u >= target); it = 1;
+  while (cond && it < maxit && y_u < y_max){
+    y_u += 1.0; // Gradual steps
+    S_u = S_cond_cpp(y_u, lambda_mat, mu_mat, sig, logt);
+    if (std::isnan(S_u)) { S_u = -INFINITY; }
+    cond = (S_u >= target);
+    it += 1;
+  }
+  
+  // Step DOWN to find the lower bound
+  cond = (S_l <= target); it = 1;
+  while (cond && it < maxit){
+    y_l -= 1.0;
+    S_l = S_cond_cpp(y_l, lambda_mat, mu_mat, sig, logt);
+    if (std::isnan(S_l)) { S_l = -INFINITY; }
+    cond = (S_l <= target);
+    it += 1;
+  }
+  
+  if (S_l > target && S_u < target){
+    cond = true; it = 1; step = y_u - y_l;
+    while (cond){
+      y_m = (y_l + y_u)/2.0;
+      S_m = S_cond_cpp(y_m, lambda_mat, mu_mat, sig, logt);
+      if (std::isnan(S_m)) { S_m = -INFINITY; }
+      
+      if (S_m > target) {
+        y_l = y_m;
+      } else {
+        y_u = y_m;
+      }
+      step /= 2.0;
+      if (std::abs(S_m - target) < tol || step < tol || it > maxit) {
+        cond = false;
+      }
+      it += 1;
+    }
+    y_star = y_m;
+  } else {
+    y_star = y_init; 
+    S_m = -999.0;
+    step = -1.0;
     it = -1;
   }
   
@@ -1376,23 +1614,6 @@ List EDPMMcluster_cpp(int const& n, int const& p_X1, int const& p_X2,
     }
   }
   
-  // return List::create(
-  //   _["Syx"] = Syx,
-  //   _["unique_Sy"] = unique_Sy,
-  //   _["unique_Syx"] = unique_Syx,
-  //   _["betaPars"] = betaPars,
-  //   _["sig2Pars"] = sig2Pars,
-  //   _["etaPars"] = etaPars,
-  //   _["piPars"] = piPars,
-  //   _["muPars"] = muPars,
-  //   _["tau2Pars"] = tau2Pars,
-  //   _["Ky"] = Ky,
-  //   _["Kyx"] = Kyx,
-  //   _["n_k"] = n_k,
-  //   _["n_rk"] = n_rk,
-  //   _["max_Sx"] = max_Sx,
-  //   _["max_Kx_Sy"] = max_Kx_Sy);
-  
   // Rcout <<
   //   "Ky: " << Ky << "\n" <<
   //     "Kyx: " << Kyx << "\n" <<
@@ -1403,490 +1624,490 @@ List EDPMMcluster_cpp(int const& n, int const& p_X1, int const& p_X2,
   //
   // Rcout << "Improve Mixing (Metropolis-Hastings)" << endl;
 
-  // ------------------------------------------------------------------------------
-  // -------------------- Improve Mixing (Metropolis-Hastings) --------------------
-  // ------------------------------------------------------------------------------
-  // initialize some dummy vars to store things
-  double ratio;
-
-  int num_max_Kx_Sy, num_max_Kx_Sy_temp, num_unique_Syx;
-  vec max_Kx_Sy_temp, cumsum_max_Kx_Sy;
-
-  uvec ind_max_Kx_Sy, ind_max_Kx_Sy_temp, uvec_cumsum_max_Kx_Sy, unique_Sy_temp;
-  umat unique_Syx_temp;
-
-  int n_k_curr, n_k_prop, n_rk_curr;
-  int Kx1_curr, Kx1_prop, Kx2_curr, Kx2_prop;
-  int k_curr, r_curr, k_prop, r_prop;
-  int k_curr_1, r_curr_1, k_prop_1;
-
-  // ---------------------------------------------------------------------------
-  // 0. Pre-calculate Marginal f0(Y) via Monte Carlo
-  // ---------------------------------------------------------------------------
-  vec f0_y = zeros(n);
-  int num_MC_prior = 1e4; // You can pass this as an argument if preferred
-  for (int m = 0; m < num_MC_prior; ++m) {
-    double sig2_draw = rscainvchisq_cpp(1, a_sig2, b_sig2)[0];
-    vec beta_draw = rmvn_cpp(1, a_beta, B_beta);
-    vec mu_vec = matX * beta_draw;
-    double sd_draw = sqrt(sig2_draw);
-    for(int i = 0; i < n; ++i) {
-      f0_y(i) += R::dnorm(Y(i), mu_vec(i), sd_draw, false);
-    }
-  }
-  f0_y = f0_y / num_MC_prior;
-
-  // Rcout << "1st" << endl;
-  // ---------------------------------- 1st move ----------------------------------
-  if (Kyx > Ky && Ky > 1){
-    ind_max_Kx_Sy = find(max_Kx_Sy == 1);
-    num_max_Kx_Sy = ind_max_Kx_Sy.size();
-
-    // Kx2_curr = Kyx - num_max_Kx_Sy;
-    //
-    // // Choose cluster (k,r) and h
-    // int choose_kr_temp = rmultinom_cpp(ones(Kx2_curr));
-    // int choose_new_k_temp = rmultinom_cpp(ones(Ky-1));
-    //
-    // unique_Syx_temp = unique_Syx;
-    // if (num_max_Kx_Sy > 0) {
-    //   ind_max_Kx_Sy = find(max_Kx_Sy != 1);
-    //   cumsum_max_Kx_Sy = cumsum(max_Kx_Sy) - ones(Ky);
-    //   cumsum_max_Kx_Sy = cumsum_max_Kx_Sy(ind_max_Kx_Sy);
-    //   uvec_cumsum_max_Kx_Sy = conv_to<uvec>::from(cumsum_max_Kx_Sy);
-    //   unique_Syx_temp = unique_Syx_temp.rows(uvec_cumsum_max_Kx_Sy);
-    // }
-
-    uvec rows_to_keep;
-    for (unsigned int k = 0; k < unique_Syx.n_rows; k++) {
-      int k_temp = unique_Syx(k, 0);
-      if (max_Kx_Sy(k_temp - 1) > 1) {
-        rows_to_keep = join_cols(rows_to_keep, uvec{k});
-      }
-    }
-    unique_Syx_temp = unique_Syx.rows(rows_to_keep);
-    Kx2_curr = unique_Syx_temp.n_rows;
-
-    int choose_kr_temp = rmultinom_cpp(ones(Kx2_curr));
-    int choose_new_k_temp = rmultinom_cpp(ones(Ky - 1));
-
-    k_curr = unique_Syx_temp(choose_kr_temp-1,0);
-    r_curr = unique_Syx_temp(choose_kr_temp-1,1);
-    k_curr_1 = k_curr - 1;
-    r_curr_1 = r_curr - 1;
-
-    unique_Sy_temp = unique_Sy;
-    unique_Sy_temp.shed_row(k_curr_1);
-    k_prop = unique_Sy_temp(choose_new_k_temp-1);
-
-    ind_unique_Syx = find(unique_Syx.col(0) == k_prop);
-    num_unique_Syx = ind_unique_Syx.size();
-    r_prop = num_unique_Syx + 1;
-    k_prop_1 = k_prop - 1;
-
-    // Calculate K_{x,2+}^{*}
-    max_Kx_Sy_temp = zeros(Ky+1);
-    max_Kx_Sy_temp.head(Ky) = max_Kx_Sy;
-    max_Kx_Sy_temp(k_curr_1) = max_Kx_Sy_temp(k_curr_1) - 1;
-    max_Kx_Sy_temp(k_prop_1) = max_Kx_Sy_temp(k_prop_1) + 1;
-    ind_max_Kx_Sy_temp = find(max_Kx_Sy_temp == 1);
-    num_max_Kx_Sy_temp = ind_max_Kx_Sy_temp.size();
-
-    Kx2_prop = Kyx - num_max_Kx_Sy_temp;
-
-    // Calculate the acceptance probability
-    n_k_prop = n_k(k_prop_1);
-
-    n_k_curr = n_k(k_curr_1);
-    n_rk_curr = n_rk(k_curr_1, r_curr_1);
-
-    ind_Syx = find(Sy == k_curr && Sx == r_curr);
-    num_Syx = ind_Syx.size();
-
-    vec Y_temp = Y(ind_Syx);
-    mat matX_temp = matX.rows(ind_Syx);
-
-    vec beta_curr = betaPars.col(k_curr_1);
-    vec sig_curr = sqrt(sig2Pars(k_curr_1)) * ones(num_Syx);
-
-    vec beta_prop = betaPars.col(k_prop_1);
-    vec sig_prop = sqrt(sig2Pars(k_prop_1)) * ones(num_Syx);
-
-    ratio =
-      ((lgamma(n_k_curr - n_rk_curr) + lgamma(n_k_prop + n_rk_curr)) -
-      (lgamma(n_k_curr) + lgamma(n_k_prop))) +
-      ((lgamma(alpha_omega + n_k_curr) + lgamma(alpha_omega + n_k_prop)) -
-      (lgamma(alpha_omega + n_k_curr - n_rk_curr) + lgamma(alpha_omega + n_k_prop + n_rk_curr))) +
-      as_scalar(sum(log_normpdf(Y_temp, matX_temp * beta_prop, sig_prop)) -
-      sum(log_normpdf(Y_temp, matX_temp * beta_curr, sig_curr))) +
-      log(Kx2_curr/Kx2_prop);
-    ratio = exp(ratio);
-
-    // If ratio > runif (1), retrun "proposed" and o.w.,do nothing, i.e. return "current".
-    if (ratio > randu(1)[0]){
-      // reorder omega parameters
-      uvec ind_unique_Syx_curr = find(unique_Syx.col(0)==k_curr && unique_Syx.col(1)==r_curr);
-      uvec ind_Sy0_prop = find(unique_Syx.col(0) <= k_prop);
-      int num_Sy0_prop = ind_Sy0_prop.size();
-
-      etaPars = reorder(etaPars,ind_unique_Syx_curr(0),num_Sy0_prop);
-      piPars  = reorder(piPars,ind_unique_Syx_curr(0),num_Sy0_prop);
-      muPars  = reorder(muPars,ind_unique_Syx_curr(0),num_Sy0_prop);
-      tau2Pars = reorder(tau2Pars,ind_unique_Syx_curr(0),num_Sy0_prop);
-
-      // relabel clusters
-      ind_Syx = find(Sy == k_curr && Sx == r_curr);
-      num_Syx = ind_Syx.size();
-      for (int ii = 0; ii < num_Syx; ii++) {
-        Sy(ind_Syx(ii)) = k_prop;
-        Sx(ind_Syx(ii)) = r_prop;
-      }
-
-      // relabel X cluster
-      ind_Syx = find(Sy == k_curr && Sx >= r_curr);
-      num_Syx = ind_Syx.size();
-      for (int ii = 0; ii < num_Syx; ii++) {
-        Sx(ind_Syx(ii)) -= 1;
-      }
-
-      // wrap-up
-      Syx = join_rows(Sy, Sx);
-
-      // Determine unique clusters from the cluster membership variable, Syx
-      unique_Syx = unique_rows(Syx);
-
-      // Make vector of y-clusters
-      unique_Sy = unique(Sy);
-
-      // Calculate the number of clusters
-      Kyx = unique_Syx.n_rows;
-
-      // Calculate the number of y-clusters
-      Ky = unique_Sy.size();
-
-      // Find the largest number of x clusters
-      max_Sx = Sx.max();
-
-      // Calculate the number of subjects in each y-cluster and store in vector n_k.
-      // Calculate the number of subjects in each x-cluster and store in matrix n_rk.
-      // Use k to index y-clusters and r to index x-clusters.
-      n_k.zeros(Ky);
-      n_rk.zeros(Ky, max_Sx);
-      max_Kx_Sy.zeros(Ky);
-      for (int k = 0; k < Ky; k++) {
-        ind_Sy = find(Sy == (k+1));
-        n_k(k) = ind_Sy.size();
-
-        ind_Sy0 = find(unique_Syx.col(0) == (k+1));
-        num_Sy0 = ind_Sy0.size();
-        max_Kx_Sy(k) = num_Sy0;
-        for (int r = 0; r < num_Sy0; r++) {
-          ind_Syx = find(Sx(ind_Sy) == (r+1));
-          n_rk(k,r) = ind_Syx.size();
-        }
-      }
-    }
-  }
-
-  // Rcout << "2nd or 3rd" << endl;
-  // 2nd/3rd Move
-  if (randu(1)[0] < 0.5) {
-    // ---------------------------------- 2nd move ----------------------------------
-    if (Kyx > Ky) {
-      // Calculate K_{x,1} and K_{x,2+}
-      ind_max_Kx_Sy = find(max_Kx_Sy == 1);
-      num_max_Kx_Sy = ind_max_Kx_Sy.size();
-
-      // Kx2_curr = Kyx - num_max_Kx_Sy;
-      //
-      // // Choose cluster (k,r) and h
-      // int choose_kr_temp = rmultinom_cpp(ones(Kx2_curr));
-      //
-      // unique_Syx_temp = unique_Syx;
-      // if (num_max_Kx_Sy > 0) {
-      //   ind_max_Kx_Sy = find(max_Kx_Sy != 1);
-      //   cumsum_max_Kx_Sy = cumsum(max_Kx_Sy) - ones(Ky);
-      //   cumsum_max_Kx_Sy = cumsum_max_Kx_Sy(ind_max_Kx_Sy);
-      //   uvec_cumsum_max_Kx_Sy = conv_to<uvec>::from(cumsum_max_Kx_Sy);
-      //   unique_Syx_temp = unique_Syx_temp.rows(uvec_cumsum_max_Kx_Sy);
-      // }
-
-      uvec rows_to_keep;
-      for (unsigned int k = 0; k < unique_Syx.n_rows; k++) {
-        int k_temp = unique_Syx(k, 0);
-        if (max_Kx_Sy(k_temp - 1) > 1) {
-          rows_to_keep = join_cols(rows_to_keep, uvec{k});
-        }
-      }
-      unique_Syx_temp = unique_Syx.rows(rows_to_keep);
-      Kx2_curr = unique_Syx_temp.n_rows;
-
-      int choose_kr_temp = rmultinom_cpp(ones(Kx2_curr));
-      k_curr = unique_Syx_temp(choose_kr_temp-1,0);
-      r_curr = unique_Syx_temp(choose_kr_temp-1,1);
-      k_prop = Ky + 1;
-      r_prop = 1;
-
-      k_curr_1 = k_curr - 1;
-      r_curr_1 = r_curr - 1;
-      k_prop_1 = k_prop - 1;
-
-      // Calculate K_{x,1}^{*}
-      max_Kx_Sy_temp = zeros(Ky+1);
-      max_Kx_Sy_temp.head(Ky) = max_Kx_Sy;
-      max_Kx_Sy_temp(k_curr_1) = max_Kx_Sy_temp(k_curr_1) - 1;
-      max_Kx_Sy_temp(k_prop_1) = max_Kx_Sy_temp(k_prop_1) + 1;
-      ind_max_Kx_Sy_temp = find(max_Kx_Sy_temp == 1);
-      num_max_Kx_Sy_temp = ind_max_Kx_Sy_temp.size();
-
-      Kx1_prop = num_max_Kx_Sy_temp;
-
-      // Calculate the acceptance probability
-      n_k_curr = n_k(k_curr_1);
-      n_rk_curr = n_rk(k_curr_1, r_curr_1);
-
-      ind_Syx = find(Sy == k_curr && Sx == r_curr);
-      num_Syx = ind_Syx.size();
-
-      vec Y_temp = Y(ind_Syx);
-      mat matX_temp = matX.rows(ind_Syx);
-
-      vec beta_curr = betaPars.col(k_curr_1);
-      vec sig_curr = sqrt(sig2Pars(k_curr_1)) * ones(num_Syx);
-
-      ratio =
-        (lgamma(n_k_curr - n_rk_curr) + lgamma(n_rk_curr) - lgamma(n_k_curr)) +
-        ((lgamma(alpha_omega + n_k_curr) + lgamma(alpha_omega)) -
-        (lgamma(alpha_omega + n_k_curr - n_rk_curr) + lgamma(alpha_omega + n_rk_curr))) +
-        as_scalar((sum(log(f0_y(ind_Syx)))) -
-        (sum(log_normpdf(Y_temp, matX_temp * beta_curr, sig_curr)))) +
-        log(Kx2_curr/(Kx1_prop*Kyx)) + log(alpha_theta);
-      ratio = exp(ratio);
-
-      // If ratio > runif (1), retrun "proposed" and o.w.,do nothing, i.e. retrun "current".
-      if (ratio > randu(1)[0]){
-        // Add theta parameters
-        beta_prop = rmvn_cpp(1, a_beta, B_beta).col(0);
-        betaPars.insert_cols(Ky, beta_prop);
-
-        sig2_prop = rscainvchisq_cpp(1, a_sig2, b_sig2)[0];
-        sig2Pars.insert_cols(Ky, 1);
-        sig2Pars(0, Ky) = sig2_prop;
-
-        // reorder omega parameters
-        uvec ind_unique_Syx_curr = find(unique_Syx.col(0) == k_curr && unique_Syx.col(1) == r_curr);
-        etaPars  = reorder(etaPars, ind_unique_Syx_curr(0), Kyx - 1);
-        piPars   = reorder(piPars, ind_unique_Syx_curr(0), Kyx - 1);
-        muPars   = reorder(muPars, ind_unique_Syx_curr(0), Kyx - 1);
-        tau2Pars = reorder(tau2Pars, ind_unique_Syx_curr(0), Kyx - 1);
-
-        // relabel clusters
-        ind_Syx = find(Sy == k_curr && Sx == r_curr);
-        num_Syx = ind_Syx.size();
-        for (int ii = 0; ii < num_Syx; ii++) {
-          Sy(ind_Syx(ii)) = k_prop;
-          Sx(ind_Syx(ii)) = r_prop;
-        }
-
-        // relabel X cluster
-        ind_Syx = find(Sy == k_curr && Sx > r_curr);
-        num_Syx = ind_Syx.size();
-        for (int ii = 0; ii < num_Syx; ii++) {
-          Sx(ind_Syx(ii)) -= 1;
-        }
-
-        // wrap-up
-        Syx = join_rows(Sy, Sx);
-
-        // Determine unique clusters from the cluster membership variable, Syx
-        unique_Syx = unique_rows(Syx);
-
-        // Make vector of y-clusters
-        unique_Sy = unique(Sy);
-
-        // Calculate the number of clusters
-        Kyx = unique_Syx.n_rows;
-
-        // Calculate the number of y-clusters
-        Ky = unique_Sy.size();
-
-        // Find the largest number of x clusters
-        max_Sx = Sx.max();
-
-        // Calculate the number of subjects in each y-cluster and store in vector n_k.
-        // Calculate the number of subjects in each x-cluster and store in matrix n_rk.
-        // Use k to index y-clusters and r to index x-clusters.
-        n_k.zeros(Ky);
-        n_rk.zeros(Ky, max_Sx);
-        max_Kx_Sy.zeros(Ky);
-        for (int k = 0; k < Ky; k++) {
-          ind_Sy = find(Sy == (k+1));
-          n_k(k) = ind_Sy.size();
-
-          ind_Sy0 = find(unique_Syx.col(0) == (k+1));
-          num_Sy0 = ind_Sy0.size();
-          max_Kx_Sy(k) = num_Sy0;
-          for (int r = 0; r < num_Sy0; r++) {
-            ind_Syx = find(Sx(ind_Sy) == (r+1));
-            n_rk(k,r) = ind_Syx.size();
-          }
-        }
-      }
-    }
-  } else {
-    // ---------------------------------- 3rd move ----------------------------------
-    // Calculate K_{x,1} and K_{x,2+}
-    ind_max_Kx_Sy = find(max_Kx_Sy == 1);
-    num_max_Kx_Sy = ind_max_Kx_Sy.size();
-
-    // Initialize Kx1_curr safely
-    Kx1_curr = 0;
-
-    if (num_max_Kx_Sy>0 && Ky>1){
-      Kx1_curr = num_max_Kx_Sy;
-
-      // Choose cluster (k,r) and h
-      // int choose_kr_temp = rmultinom_cpp(ones(Kx1_curr));
-      // int choose_new_k_temp = rmultinom_cpp(ones(Ky-1));
-      //
-      // cumsum_max_Kx_Sy = cumsum(max_Kx_Sy) - ones(Ky);
-      // cumsum_max_Kx_Sy = cumsum_max_Kx_Sy(ind_max_Kx_Sy);
-      // uvec_cumsum_max_Kx_Sy = conv_to<uvec>::from(cumsum_max_Kx_Sy);
-      // unique_Syx_temp = unique_Syx.rows(uvec_cumsum_max_Kx_Sy);
-      //
-      // k_curr = unique_Syx_temp(choose_kr_temp-1,0);
-      uvec rows_to_keep;
-      for (unsigned int k = 0; k < unique_Syx.n_rows; k++) {
-        int k_temp = unique_Syx(k, 0);
-        if (max_Kx_Sy(k_temp - 1) == 1) {
-          rows_to_keep = join_cols(rows_to_keep, uvec{k});
-        }
-      }
-      if (rows_to_keep.n_elem > 0) {
-        unique_Syx_temp = unique_Syx.rows(rows_to_keep);
-        Kx1_curr = unique_Syx_temp.n_rows;
-
-        int choose_kr_temp = rmultinom_cpp(ones(Kx1_curr));
-        k_curr = unique_Syx_temp(choose_kr_temp - 1, 0);
-        r_curr = 1;
-        k_curr_1 = k_curr - 1;
-        r_curr_1 = r_curr - 1;
-
-        int choose_new_k_temp = rmultinom_cpp(ones(Ky - 1));
-        unique_Sy_temp = unique_Sy;
-        unique_Sy_temp.shed_row(k_curr_1);
-        k_prop = unique_Sy_temp(choose_new_k_temp-1);
-
-        ind_unique_Syx = find(unique_Syx.col(0) == k_prop);
-        num_unique_Syx = ind_unique_Syx.size();
-        r_prop = num_unique_Syx + 1;
-        k_prop_1 = k_prop - 1;
-
-        // Calculate K_{x,2+}^{*}
-        max_Kx_Sy_temp = zeros(Ky+1);
-        max_Kx_Sy_temp.head(Ky) = max_Kx_Sy;
-        max_Kx_Sy_temp(k_curr_1) = max_Kx_Sy_temp(k_curr_1) - 1;
-        max_Kx_Sy_temp(k_prop_1) = max_Kx_Sy_temp(k_prop_1) + 1;
-        ind_max_Kx_Sy_temp = find(max_Kx_Sy_temp == 1);
-        num_max_Kx_Sy_temp = ind_max_Kx_Sy_temp.size();
-
-        Kx2_prop = Kyx - num_max_Kx_Sy_temp;
-
-        // Calculate the acceptance probability
-        n_k_prop = n_k(k_prop_1);
-
-        n_k_curr = n_k(k_curr_1);
-        n_rk_curr = n_rk(k_curr_1,r_curr_1);
-
-        ind_Syx = find(Sy == k_curr && Sx == r_curr);
-        num_Syx = ind_Syx.size();
-
-        vec Y_temp = Y(ind_Syx);
-        mat matX_temp = matX.rows(ind_Syx);
-
-        vec beta_prop = betaPars.col(k_prop_1);
-        vec sig_prop = sqrt(sig2Pars(k_prop_1)) * ones(num_Syx);
-
-        ratio =
-          (lgamma(n_k_prop + n_rk_curr) - (lgamma(n_rk_curr) + lgamma(n_k_prop))) +
-          ((lgamma(alpha_omega + n_rk_curr) + lgamma(alpha_omega + n_k_prop)) -
-          (lgamma(alpha_omega) + lgamma(alpha_omega + n_k_prop + n_rk_curr))) +
-          as_scalar((sum(log_normpdf(Y_temp, matX_temp * beta_prop, sig_prop))) -
-          (sum(log(f0_y(ind_Syx))))) -
-          log((Kx1_curr * Kyx - 1)/Kx2_prop) - log(alpha_theta);
-        ratio = exp(ratio);
-
-        // If ratio > runif (1), retrun "proposed" and o.w.,do nothing, i.e. retrun "current".
-        if (ratio > randu(1)[0]){
-          // Delete theta parameters
-          betaPars.shed_col(k_curr_1);
-          sig2Pars.shed_col(k_curr_1);
-
-          // reorder omega parameters
-          uvec ind_unique_Syx_curr = find(unique_Syx.col(0)==k_curr && unique_Syx.col(1)==r_curr);
-          uvec ind_Sy0_prop = find(unique_Syx.col(0) <= k_prop);
-          int num_Sy0_prop = ind_Sy0_prop.size();
-
-          etaPars  = reorder(etaPars, ind_unique_Syx_curr(0), num_Sy0_prop);
-          piPars   = reorder(piPars,  ind_unique_Syx_curr(0), num_Sy0_prop);
-          muPars   = reorder(muPars,  ind_unique_Syx_curr(0), num_Sy0_prop);
-          tau2Pars = reorder(tau2Pars, ind_unique_Syx_curr(0), num_Sy0_prop);
-
-          // relabel clusters
-          ind_Syx = find(Sy == k_curr && Sx == r_curr);
-          num_Syx = ind_Syx.size();
-          for (int ii = 0; ii < num_Syx; ii++) {
-            Sy(ind_Syx(ii)) = k_prop;
-            Sx(ind_Syx(ii)) = r_prop;
-          }
-
-          // relabel Y cluster
-          ind_Sy = find(Sy >= k_curr);
-          num_Sy = ind_Sy.size();
-          for (int ii = 0; ii < num_Sy; ii++) {
-            Sy(ind_Sy(ii)) -= 1;
-          }
-
-          // wrap-up
-          Syx = join_rows(Sy, Sx);
-
-          // Determine unique clusters from the cluster membership variable, Syx
-          unique_Syx = unique_rows(Syx);
-
-          // Make vector of y-clusters
-          unique_Sy = unique(Sy);
-
-          // Calculate the number of clusters
-          Kyx = unique_Syx.n_rows;
-
-          // Calculate the number of y-clusters
-          Ky = unique_Sy.size();
-
-          // Find the largest number of x clusters
-          max_Sx = Sx.max();
-
-          // Calculate the number of subjects in each y-cluster and store in vector n_k.
-          // Calculate the number of subjects in each x-cluster and store in matrix n_rk.
-          // Use k to index y-clusters and r to index x-clusters.
-          n_k.zeros(Ky);
-          n_rk.zeros(Ky, max_Sx);
-          max_Kx_Sy.zeros(Ky);
-          for (int k = 0; k < Ky; k++) {
-            ind_Sy = find(Sy == (k+1));
-            n_k(k) = ind_Sy.size();
-
-            ind_Sy0 = find(unique_Syx.col(0) == (k+1));
-            num_Sy0 = ind_Sy0.size();
-            max_Kx_Sy(k) = num_Sy0;
-            for (int r = 0; r < num_Sy0; r++) {
-              ind_Syx = find(Sx(ind_Sy) == (r+1));
-              n_rk(k,r) = ind_Syx.size();
-            }
-          }
-        }
-      }
-    }
-  }
+  // // ------------------------------------------------------------------------------
+  // // -------------------- Improve Mixing (Metropolis-Hastings) --------------------
+  // // ------------------------------------------------------------------------------
+  // // initialize some dummy vars to store things
+  // double ratio;
+  // 
+  // int num_max_Kx_Sy, num_max_Kx_Sy_temp, num_unique_Syx;
+  // vec max_Kx_Sy_temp, cumsum_max_Kx_Sy;
+  // 
+  // uvec ind_max_Kx_Sy, ind_max_Kx_Sy_temp, uvec_cumsum_max_Kx_Sy, unique_Sy_temp;
+  // umat unique_Syx_temp;
+  // 
+  // int n_k_curr, n_k_prop, n_rk_curr;
+  // int Kx1_curr, Kx1_prop, Kx2_curr, Kx2_prop;
+  // int k_curr, r_curr, k_prop, r_prop;
+  // int k_curr_1, r_curr_1, k_prop_1;
+  // 
+  // // ---------------------------------------------------------------------------
+  // // 0. Pre-calculate Marginal f0(Y) via Monte Carlo
+  // // ---------------------------------------------------------------------------
+  // vec f0_y = zeros(n);
+  // int num_MC_prior = 1e4; // You can pass this as an argument if preferred
+  // for (int m = 0; m < num_MC_prior; ++m) {
+  //   double sig2_draw = rscainvchisq_cpp(1, a_sig2, b_sig2)[0];
+  //   vec beta_draw = rmvn_cpp(1, a_beta, B_beta);
+  //   vec mu_vec = matX * beta_draw;
+  //   double sd_draw = sqrt(sig2_draw);
+  //   for(int i = 0; i < n; ++i) {
+  //     f0_y(i) += R::dnorm(Y(i), mu_vec(i), sd_draw, false);
+  //   }
+  // }
+  // f0_y = f0_y / num_MC_prior;
+  // 
+  // // Rcout << "1st" << endl;
+  // // ---------------------------------- 1st move ----------------------------------
+  // if (Kyx > Ky && Ky > 1){
+  //   ind_max_Kx_Sy = find(max_Kx_Sy == 1);
+  //   num_max_Kx_Sy = ind_max_Kx_Sy.size();
+  // 
+  //   // Kx2_curr = Kyx - num_max_Kx_Sy;
+  //   //
+  //   // // Choose cluster (k,r) and h
+  //   // int choose_kr_temp = rmultinom_cpp(ones(Kx2_curr));
+  //   // int choose_new_k_temp = rmultinom_cpp(ones(Ky-1));
+  //   //
+  //   // unique_Syx_temp = unique_Syx;
+  //   // if (num_max_Kx_Sy > 0) {
+  //   //   ind_max_Kx_Sy = find(max_Kx_Sy != 1);
+  //   //   cumsum_max_Kx_Sy = cumsum(max_Kx_Sy) - ones(Ky);
+  //   //   cumsum_max_Kx_Sy = cumsum_max_Kx_Sy(ind_max_Kx_Sy);
+  //   //   uvec_cumsum_max_Kx_Sy = conv_to<uvec>::from(cumsum_max_Kx_Sy);
+  //   //   unique_Syx_temp = unique_Syx_temp.rows(uvec_cumsum_max_Kx_Sy);
+  //   // }
+  // 
+  //   uvec rows_to_keep;
+  //   for (unsigned int k = 0; k < unique_Syx.n_rows; k++) {
+  //     int k_temp = unique_Syx(k, 0);
+  //     if (max_Kx_Sy(k_temp - 1) > 1) {
+  //       rows_to_keep = join_cols(rows_to_keep, uvec{k});
+  //     }
+  //   }
+  //   unique_Syx_temp = unique_Syx.rows(rows_to_keep);
+  //   Kx2_curr = unique_Syx_temp.n_rows;
+  // 
+  //   int choose_kr_temp = rmultinom_cpp(ones(Kx2_curr));
+  //   int choose_new_k_temp = rmultinom_cpp(ones(Ky - 1));
+  // 
+  //   k_curr = unique_Syx_temp(choose_kr_temp-1,0);
+  //   r_curr = unique_Syx_temp(choose_kr_temp-1,1);
+  //   k_curr_1 = k_curr - 1;
+  //   r_curr_1 = r_curr - 1;
+  // 
+  //   unique_Sy_temp = unique_Sy;
+  //   unique_Sy_temp.shed_row(k_curr_1);
+  //   k_prop = unique_Sy_temp(choose_new_k_temp-1);
+  // 
+  //   ind_unique_Syx = find(unique_Syx.col(0) == k_prop);
+  //   num_unique_Syx = ind_unique_Syx.size();
+  //   r_prop = num_unique_Syx + 1;
+  //   k_prop_1 = k_prop - 1;
+  // 
+  //   // Calculate K_{x,2+}^{*}
+  //   max_Kx_Sy_temp = zeros(Ky+1);
+  //   max_Kx_Sy_temp.head(Ky) = max_Kx_Sy;
+  //   max_Kx_Sy_temp(k_curr_1) = max_Kx_Sy_temp(k_curr_1) - 1;
+  //   max_Kx_Sy_temp(k_prop_1) = max_Kx_Sy_temp(k_prop_1) + 1;
+  //   ind_max_Kx_Sy_temp = find(max_Kx_Sy_temp == 1);
+  //   num_max_Kx_Sy_temp = ind_max_Kx_Sy_temp.size();
+  // 
+  //   Kx2_prop = Kyx - num_max_Kx_Sy_temp;
+  // 
+  //   // Calculate the acceptance probability
+  //   n_k_prop = n_k(k_prop_1);
+  // 
+  //   n_k_curr = n_k(k_curr_1);
+  //   n_rk_curr = n_rk(k_curr_1, r_curr_1);
+  // 
+  //   ind_Syx = find(Sy == k_curr && Sx == r_curr);
+  //   num_Syx = ind_Syx.size();
+  // 
+  //   vec Y_temp = Y(ind_Syx);
+  //   mat matX_temp = matX.rows(ind_Syx);
+  // 
+  //   vec beta_curr = betaPars.col(k_curr_1);
+  //   vec sig_curr = sqrt(sig2Pars(k_curr_1)) * ones(num_Syx);
+  // 
+  //   vec beta_prop = betaPars.col(k_prop_1);
+  //   vec sig_prop = sqrt(sig2Pars(k_prop_1)) * ones(num_Syx);
+  // 
+  //   ratio =
+  //     ((lgamma(n_k_curr - n_rk_curr) + lgamma(n_k_prop + n_rk_curr)) -
+  //     (lgamma(n_k_curr) + lgamma(n_k_prop))) +
+  //     ((lgamma(alpha_omega + n_k_curr) + lgamma(alpha_omega + n_k_prop)) -
+  //     (lgamma(alpha_omega + n_k_curr - n_rk_curr) + lgamma(alpha_omega + n_k_prop + n_rk_curr))) +
+  //     as_scalar(sum(log_normpdf(Y_temp, matX_temp * beta_prop, sig_prop)) -
+  //     sum(log_normpdf(Y_temp, matX_temp * beta_curr, sig_curr))) +
+  //     log(Kx2_curr/Kx2_prop);
+  //   ratio = exp(ratio);
+  // 
+  //   // If ratio > runif (1), retrun "proposed" and o.w.,do nothing, i.e. return "current".
+  //   if (ratio > randu(1)[0]){
+  //     // reorder omega parameters
+  //     uvec ind_unique_Syx_curr = find(unique_Syx.col(0)==k_curr && unique_Syx.col(1)==r_curr);
+  //     uvec ind_Sy0_prop = find(unique_Syx.col(0) <= k_prop);
+  //     int num_Sy0_prop = ind_Sy0_prop.size();
+  // 
+  //     etaPars = reorder(etaPars,ind_unique_Syx_curr(0),num_Sy0_prop);
+  //     piPars  = reorder(piPars,ind_unique_Syx_curr(0),num_Sy0_prop);
+  //     muPars  = reorder(muPars,ind_unique_Syx_curr(0),num_Sy0_prop);
+  //     tau2Pars = reorder(tau2Pars,ind_unique_Syx_curr(0),num_Sy0_prop);
+  // 
+  //     // relabel clusters
+  //     ind_Syx = find(Sy == k_curr && Sx == r_curr);
+  //     num_Syx = ind_Syx.size();
+  //     for (int ii = 0; ii < num_Syx; ii++) {
+  //       Sy(ind_Syx(ii)) = k_prop;
+  //       Sx(ind_Syx(ii)) = r_prop;
+  //     }
+  // 
+  //     // relabel X cluster
+  //     ind_Syx = find(Sy == k_curr && Sx >= r_curr);
+  //     num_Syx = ind_Syx.size();
+  //     for (int ii = 0; ii < num_Syx; ii++) {
+  //       Sx(ind_Syx(ii)) -= 1;
+  //     }
+  // 
+  //     // wrap-up
+  //     Syx = join_rows(Sy, Sx);
+  // 
+  //     // Determine unique clusters from the cluster membership variable, Syx
+  //     unique_Syx = unique_rows(Syx);
+  // 
+  //     // Make vector of y-clusters
+  //     unique_Sy = unique(Sy);
+  // 
+  //     // Calculate the number of clusters
+  //     Kyx = unique_Syx.n_rows;
+  // 
+  //     // Calculate the number of y-clusters
+  //     Ky = unique_Sy.size();
+  // 
+  //     // Find the largest number of x clusters
+  //     max_Sx = Sx.max();
+  // 
+  //     // Calculate the number of subjects in each y-cluster and store in vector n_k.
+  //     // Calculate the number of subjects in each x-cluster and store in matrix n_rk.
+  //     // Use k to index y-clusters and r to index x-clusters.
+  //     n_k.zeros(Ky);
+  //     n_rk.zeros(Ky, max_Sx);
+  //     max_Kx_Sy.zeros(Ky);
+  //     for (int k = 0; k < Ky; k++) {
+  //       ind_Sy = find(Sy == (k+1));
+  //       n_k(k) = ind_Sy.size();
+  // 
+  //       ind_Sy0 = find(unique_Syx.col(0) == (k+1));
+  //       num_Sy0 = ind_Sy0.size();
+  //       max_Kx_Sy(k) = num_Sy0;
+  //       for (int r = 0; r < num_Sy0; r++) {
+  //         ind_Syx = find(Sx(ind_Sy) == (r+1));
+  //         n_rk(k,r) = ind_Syx.size();
+  //       }
+  //     }
+  //   }
+  // }
+  // 
+  // // Rcout << "2nd or 3rd" << endl;
+  // // 2nd/3rd Move
+  // if (randu(1)[0] < 0.5) {
+  //   // ---------------------------------- 2nd move ----------------------------------
+  //   if (Kyx > Ky) {
+  //     // Calculate K_{x,1} and K_{x,2+}
+  //     ind_max_Kx_Sy = find(max_Kx_Sy == 1);
+  //     num_max_Kx_Sy = ind_max_Kx_Sy.size();
+  // 
+  //     // Kx2_curr = Kyx - num_max_Kx_Sy;
+  //     //
+  //     // // Choose cluster (k,r) and h
+  //     // int choose_kr_temp = rmultinom_cpp(ones(Kx2_curr));
+  //     //
+  //     // unique_Syx_temp = unique_Syx;
+  //     // if (num_max_Kx_Sy > 0) {
+  //     //   ind_max_Kx_Sy = find(max_Kx_Sy != 1);
+  //     //   cumsum_max_Kx_Sy = cumsum(max_Kx_Sy) - ones(Ky);
+  //     //   cumsum_max_Kx_Sy = cumsum_max_Kx_Sy(ind_max_Kx_Sy);
+  //     //   uvec_cumsum_max_Kx_Sy = conv_to<uvec>::from(cumsum_max_Kx_Sy);
+  //     //   unique_Syx_temp = unique_Syx_temp.rows(uvec_cumsum_max_Kx_Sy);
+  //     // }
+  // 
+  //     uvec rows_to_keep;
+  //     for (unsigned int k = 0; k < unique_Syx.n_rows; k++) {
+  //       int k_temp = unique_Syx(k, 0);
+  //       if (max_Kx_Sy(k_temp - 1) > 1) {
+  //         rows_to_keep = join_cols(rows_to_keep, uvec{k});
+  //       }
+  //     }
+  //     unique_Syx_temp = unique_Syx.rows(rows_to_keep);
+  //     Kx2_curr = unique_Syx_temp.n_rows;
+  // 
+  //     int choose_kr_temp = rmultinom_cpp(ones(Kx2_curr));
+  //     k_curr = unique_Syx_temp(choose_kr_temp-1,0);
+  //     r_curr = unique_Syx_temp(choose_kr_temp-1,1);
+  //     k_prop = Ky + 1;
+  //     r_prop = 1;
+  // 
+  //     k_curr_1 = k_curr - 1;
+  //     r_curr_1 = r_curr - 1;
+  //     k_prop_1 = k_prop - 1;
+  // 
+  //     // Calculate K_{x,1}^{*}
+  //     max_Kx_Sy_temp = zeros(Ky+1);
+  //     max_Kx_Sy_temp.head(Ky) = max_Kx_Sy;
+  //     max_Kx_Sy_temp(k_curr_1) = max_Kx_Sy_temp(k_curr_1) - 1;
+  //     max_Kx_Sy_temp(k_prop_1) = max_Kx_Sy_temp(k_prop_1) + 1;
+  //     ind_max_Kx_Sy_temp = find(max_Kx_Sy_temp == 1);
+  //     num_max_Kx_Sy_temp = ind_max_Kx_Sy_temp.size();
+  // 
+  //     Kx1_prop = num_max_Kx_Sy_temp;
+  // 
+  //     // Calculate the acceptance probability
+  //     n_k_curr = n_k(k_curr_1);
+  //     n_rk_curr = n_rk(k_curr_1, r_curr_1);
+  // 
+  //     ind_Syx = find(Sy == k_curr && Sx == r_curr);
+  //     num_Syx = ind_Syx.size();
+  // 
+  //     vec Y_temp = Y(ind_Syx);
+  //     mat matX_temp = matX.rows(ind_Syx);
+  // 
+  //     vec beta_curr = betaPars.col(k_curr_1);
+  //     vec sig_curr = sqrt(sig2Pars(k_curr_1)) * ones(num_Syx);
+  // 
+  //     ratio =
+  //       (lgamma(n_k_curr - n_rk_curr) + lgamma(n_rk_curr) - lgamma(n_k_curr)) +
+  //       ((lgamma(alpha_omega + n_k_curr) + lgamma(alpha_omega)) -
+  //       (lgamma(alpha_omega + n_k_curr - n_rk_curr) + lgamma(alpha_omega + n_rk_curr))) +
+  //       as_scalar((sum(log(f0_y(ind_Syx)))) -
+  //       (sum(log_normpdf(Y_temp, matX_temp * beta_curr, sig_curr)))) +
+  //       log(Kx2_curr/(Kx1_prop*Kyx)) + log(alpha_theta);
+  //     ratio = exp(ratio);
+  // 
+  //     // If ratio > runif (1), retrun "proposed" and o.w.,do nothing, i.e. retrun "current".
+  //     if (ratio > randu(1)[0]){
+  //       // Add theta parameters
+  //       beta_prop = rmvn_cpp(1, a_beta, B_beta).col(0);
+  //       betaPars.insert_cols(Ky, beta_prop);
+  // 
+  //       sig2_prop = rscainvchisq_cpp(1, a_sig2, b_sig2)[0];
+  //       sig2Pars.insert_cols(Ky, 1);
+  //       sig2Pars(0, Ky) = sig2_prop;
+  // 
+  //       // reorder omega parameters
+  //       uvec ind_unique_Syx_curr = find(unique_Syx.col(0) == k_curr && unique_Syx.col(1) == r_curr);
+  //       etaPars  = reorder(etaPars, ind_unique_Syx_curr(0), Kyx - 1);
+  //       piPars   = reorder(piPars, ind_unique_Syx_curr(0), Kyx - 1);
+  //       muPars   = reorder(muPars, ind_unique_Syx_curr(0), Kyx - 1);
+  //       tau2Pars = reorder(tau2Pars, ind_unique_Syx_curr(0), Kyx - 1);
+  // 
+  //       // relabel clusters
+  //       ind_Syx = find(Sy == k_curr && Sx == r_curr);
+  //       num_Syx = ind_Syx.size();
+  //       for (int ii = 0; ii < num_Syx; ii++) {
+  //         Sy(ind_Syx(ii)) = k_prop;
+  //         Sx(ind_Syx(ii)) = r_prop;
+  //       }
+  // 
+  //       // relabel X cluster
+  //       ind_Syx = find(Sy == k_curr && Sx > r_curr);
+  //       num_Syx = ind_Syx.size();
+  //       for (int ii = 0; ii < num_Syx; ii++) {
+  //         Sx(ind_Syx(ii)) -= 1;
+  //       }
+  // 
+  //       // wrap-up
+  //       Syx = join_rows(Sy, Sx);
+  // 
+  //       // Determine unique clusters from the cluster membership variable, Syx
+  //       unique_Syx = unique_rows(Syx);
+  // 
+  //       // Make vector of y-clusters
+  //       unique_Sy = unique(Sy);
+  // 
+  //       // Calculate the number of clusters
+  //       Kyx = unique_Syx.n_rows;
+  // 
+  //       // Calculate the number of y-clusters
+  //       Ky = unique_Sy.size();
+  // 
+  //       // Find the largest number of x clusters
+  //       max_Sx = Sx.max();
+  // 
+  //       // Calculate the number of subjects in each y-cluster and store in vector n_k.
+  //       // Calculate the number of subjects in each x-cluster and store in matrix n_rk.
+  //       // Use k to index y-clusters and r to index x-clusters.
+  //       n_k.zeros(Ky);
+  //       n_rk.zeros(Ky, max_Sx);
+  //       max_Kx_Sy.zeros(Ky);
+  //       for (int k = 0; k < Ky; k++) {
+  //         ind_Sy = find(Sy == (k+1));
+  //         n_k(k) = ind_Sy.size();
+  // 
+  //         ind_Sy0 = find(unique_Syx.col(0) == (k+1));
+  //         num_Sy0 = ind_Sy0.size();
+  //         max_Kx_Sy(k) = num_Sy0;
+  //         for (int r = 0; r < num_Sy0; r++) {
+  //           ind_Syx = find(Sx(ind_Sy) == (r+1));
+  //           n_rk(k,r) = ind_Syx.size();
+  //         }
+  //       }
+  //     }
+  //   }
+  // } else {
+  //   // ---------------------------------- 3rd move ----------------------------------
+  //   // Calculate K_{x,1} and K_{x,2+}
+  //   ind_max_Kx_Sy = find(max_Kx_Sy == 1);
+  //   num_max_Kx_Sy = ind_max_Kx_Sy.size();
+  // 
+  //   // Initialize Kx1_curr safely
+  //   Kx1_curr = 0;
+  // 
+  //   if (num_max_Kx_Sy>0 && Ky>1){
+  //     Kx1_curr = num_max_Kx_Sy;
+  // 
+  //     // Choose cluster (k,r) and h
+  //     // int choose_kr_temp = rmultinom_cpp(ones(Kx1_curr));
+  //     // int choose_new_k_temp = rmultinom_cpp(ones(Ky-1));
+  //     //
+  //     // cumsum_max_Kx_Sy = cumsum(max_Kx_Sy) - ones(Ky);
+  //     // cumsum_max_Kx_Sy = cumsum_max_Kx_Sy(ind_max_Kx_Sy);
+  //     // uvec_cumsum_max_Kx_Sy = conv_to<uvec>::from(cumsum_max_Kx_Sy);
+  //     // unique_Syx_temp = unique_Syx.rows(uvec_cumsum_max_Kx_Sy);
+  //     //
+  //     // k_curr = unique_Syx_temp(choose_kr_temp-1,0);
+  //     uvec rows_to_keep;
+  //     for (unsigned int k = 0; k < unique_Syx.n_rows; k++) {
+  //       int k_temp = unique_Syx(k, 0);
+  //       if (max_Kx_Sy(k_temp - 1) == 1) {
+  //         rows_to_keep = join_cols(rows_to_keep, uvec{k});
+  //       }
+  //     }
+  //     if (rows_to_keep.n_elem > 0) {
+  //       unique_Syx_temp = unique_Syx.rows(rows_to_keep);
+  //       Kx1_curr = unique_Syx_temp.n_rows;
+  // 
+  //       int choose_kr_temp = rmultinom_cpp(ones(Kx1_curr));
+  //       k_curr = unique_Syx_temp(choose_kr_temp - 1, 0);
+  //       r_curr = 1;
+  //       k_curr_1 = k_curr - 1;
+  //       r_curr_1 = r_curr - 1;
+  // 
+  //       int choose_new_k_temp = rmultinom_cpp(ones(Ky - 1));
+  //       unique_Sy_temp = unique_Sy;
+  //       unique_Sy_temp.shed_row(k_curr_1);
+  //       k_prop = unique_Sy_temp(choose_new_k_temp-1);
+  // 
+  //       ind_unique_Syx = find(unique_Syx.col(0) == k_prop);
+  //       num_unique_Syx = ind_unique_Syx.size();
+  //       r_prop = num_unique_Syx + 1;
+  //       k_prop_1 = k_prop - 1;
+  // 
+  //       // Calculate K_{x,2+}^{*}
+  //       max_Kx_Sy_temp = zeros(Ky+1);
+  //       max_Kx_Sy_temp.head(Ky) = max_Kx_Sy;
+  //       max_Kx_Sy_temp(k_curr_1) = max_Kx_Sy_temp(k_curr_1) - 1;
+  //       max_Kx_Sy_temp(k_prop_1) = max_Kx_Sy_temp(k_prop_1) + 1;
+  //       ind_max_Kx_Sy_temp = find(max_Kx_Sy_temp == 1);
+  //       num_max_Kx_Sy_temp = ind_max_Kx_Sy_temp.size();
+  // 
+  //       Kx2_prop = Kyx - num_max_Kx_Sy_temp;
+  // 
+  //       // Calculate the acceptance probability
+  //       n_k_prop = n_k(k_prop_1);
+  // 
+  //       n_k_curr = n_k(k_curr_1);
+  //       n_rk_curr = n_rk(k_curr_1,r_curr_1);
+  // 
+  //       ind_Syx = find(Sy == k_curr && Sx == r_curr);
+  //       num_Syx = ind_Syx.size();
+  // 
+  //       vec Y_temp = Y(ind_Syx);
+  //       mat matX_temp = matX.rows(ind_Syx);
+  // 
+  //       vec beta_prop = betaPars.col(k_prop_1);
+  //       vec sig_prop = sqrt(sig2Pars(k_prop_1)) * ones(num_Syx);
+  // 
+  //       ratio =
+  //         (lgamma(n_k_prop + n_rk_curr) - (lgamma(n_rk_curr) + lgamma(n_k_prop))) +
+  //         ((lgamma(alpha_omega + n_rk_curr) + lgamma(alpha_omega + n_k_prop)) -
+  //         (lgamma(alpha_omega) + lgamma(alpha_omega + n_k_prop + n_rk_curr))) +
+  //         as_scalar((sum(log_normpdf(Y_temp, matX_temp * beta_prop, sig_prop))) -
+  //         (sum(log(f0_y(ind_Syx))))) -
+  //         log((Kx1_curr * Kyx - 1)/Kx2_prop) - log(alpha_theta);
+  //       ratio = exp(ratio);
+  // 
+  //       // If ratio > runif (1), retrun "proposed" and o.w.,do nothing, i.e. retrun "current".
+  //       if (ratio > randu(1)[0]){
+  //         // Delete theta parameters
+  //         betaPars.shed_col(k_curr_1);
+  //         sig2Pars.shed_col(k_curr_1);
+  // 
+  //         // reorder omega parameters
+  //         uvec ind_unique_Syx_curr = find(unique_Syx.col(0)==k_curr && unique_Syx.col(1)==r_curr);
+  //         uvec ind_Sy0_prop = find(unique_Syx.col(0) <= k_prop);
+  //         int num_Sy0_prop = ind_Sy0_prop.size();
+  // 
+  //         etaPars  = reorder(etaPars, ind_unique_Syx_curr(0), num_Sy0_prop);
+  //         piPars   = reorder(piPars,  ind_unique_Syx_curr(0), num_Sy0_prop);
+  //         muPars   = reorder(muPars,  ind_unique_Syx_curr(0), num_Sy0_prop);
+  //         tau2Pars = reorder(tau2Pars, ind_unique_Syx_curr(0), num_Sy0_prop);
+  // 
+  //         // relabel clusters
+  //         ind_Syx = find(Sy == k_curr && Sx == r_curr);
+  //         num_Syx = ind_Syx.size();
+  //         for (int ii = 0; ii < num_Syx; ii++) {
+  //           Sy(ind_Syx(ii)) = k_prop;
+  //           Sx(ind_Syx(ii)) = r_prop;
+  //         }
+  // 
+  //         // relabel Y cluster
+  //         ind_Sy = find(Sy >= k_curr);
+  //         num_Sy = ind_Sy.size();
+  //         for (int ii = 0; ii < num_Sy; ii++) {
+  //           Sy(ind_Sy(ii)) -= 1;
+  //         }
+  // 
+  //         // wrap-up
+  //         Syx = join_rows(Sy, Sx);
+  // 
+  //         // Determine unique clusters from the cluster membership variable, Syx
+  //         unique_Syx = unique_rows(Syx);
+  // 
+  //         // Make vector of y-clusters
+  //         unique_Sy = unique(Sy);
+  // 
+  //         // Calculate the number of clusters
+  //         Kyx = unique_Syx.n_rows;
+  // 
+  //         // Calculate the number of y-clusters
+  //         Ky = unique_Sy.size();
+  // 
+  //         // Find the largest number of x clusters
+  //         max_Sx = Sx.max();
+  // 
+  //         // Calculate the number of subjects in each y-cluster and store in vector n_k.
+  //         // Calculate the number of subjects in each x-cluster and store in matrix n_rk.
+  //         // Use k to index y-clusters and r to index x-clusters.
+  //         n_k.zeros(Ky);
+  //         n_rk.zeros(Ky, max_Sx);
+  //         max_Kx_Sy.zeros(Ky);
+  //         for (int k = 0; k < Ky; k++) {
+  //           ind_Sy = find(Sy == (k+1));
+  //           n_k(k) = ind_Sy.size();
+  // 
+  //           ind_Sy0 = find(unique_Syx.col(0) == (k+1));
+  //           num_Sy0 = ind_Sy0.size();
+  //           max_Kx_Sy(k) = num_Sy0;
+  //           for (int r = 0; r < num_Sy0; r++) {
+  //             ind_Syx = find(Sx(ind_Sy) == (r+1));
+  //             n_rk(k,r) = ind_Syx.size();
+  //           }
+  //         }
+  //       }
+  //     }
+  //   }
+  // }
 
   return List::create(
     _["Syx"] = Syx,

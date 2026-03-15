@@ -41,7 +41,7 @@ set.seed(run_ID)
 
 # 
 Scn = 1
-N = 500
+# N = 500
 # N = 1000
 {
   # esttype and saveall
@@ -96,13 +96,27 @@ N = 500
   # Data Generation --------------------------------------------------------------
   # ------------------------------------------------------------------------------
   temp_data = generate_data(Scn, N)
+  # temp_data$Xobs[3,1] = NA
+  # temp_data$Xobs[2,3] = NA
+  # temp_data = generate_data(1, 1e5, 3.20);temp_data$censoring
+  # # TRUE censoring
+  # # Scn1 => cstar = 3.20 # for 20% censoring
+  # # Scn1 => cstar = 2.80 # for 25% censoring
+  # # Scn1 => cstar = 1.79 # for 40% censoring
+  # # Scn1 => cstar = 1.15 # for 50% censoring
+  # # Scn1 => cstar = 0.53 # for 60% censoring
+  # # Scn1 => cstar = -0.52 # for 75% censoring
+  # # Scn1 => cstar = -0.95 # for 80% censoring
+  
+  # plot(density(temp_data$logY),xlim=c(-10,10),ylim=c(0,0.4));par(new=TRUE)
+  # plot(density(temp_data$logT),xlim=c(-10,10),ylim=c(0,0.3))
+  # plot(density(temp_data$logC),xlim=c(-10,10),ylim=c(0,0.3))
   
   # # ------------------------------------------------------------------------------
   # # ------------------------------------------------------------------------------
   # # ------------------------------------------------------------------------------
   # {
-  #   temp_data = generate_data(Scn, N)
-  #   (temp_data$censoring)
+  #   temp_data = generate_data(Scn, N);temp_data$censoring
   #   
   #   plot(density(temp_data$logY),
   #        xlim = c(-12, 15),
@@ -171,19 +185,18 @@ N = 500
   # ------------------------------------------------------------------------------
   # SURVIVAL_DPMM_MCMC_results = SURVIVAL_DPMM_MCMC(temp_data, gibbs_iter, gibbs_burnin, gibbs_thin)
   # warnings()
-  gibbs_thin = 1e1
+  # gibbs_thin = 1e1
+  # gibbs_iter = 1e4
+  # gibbs_burnin = 1e4
+  # M = 2e4
+  
+  gibbs_thin = 2e1
   gibbs_iter = 2e4
   gibbs_burnin = 2e4
-  
   M = 2e3
   
-  # M = 1e3
-  # gibbs_thin = 1e1
-  # gibbs_iter = 2e3
-  # gibbs_burnin = 2e3
-  
   EDPMM_results_MCMC = SURVIVAL_EDPMM_MCMC(temp_data, gibbs_iter, gibbs_burnin, gibbs_thin)
-  DPMM_results_MCMC = SURVIVAL_DPMM_MCMC(temp_data, gibbs_iter, gibbs_burnin, gibbs_thin)
+  # DPMM_results_MCMC = SURVIVAL_DPMM_MCMC(temp_data, gibbs_iter, gibbs_burnin, gibbs_thin)
   # save.image(paste0("~/Documents/Rproject/EDPqrl/source/MCMCrestultsN",N,".RData"))
   # allinfo = c(run_ID,
   #             temp_data$prob.ICE,
@@ -197,16 +210,61 @@ N = 500
   #             unlist(reference_results))
   # 
   # allinfo = data.frame(t(allinfo))
+}
+
+{
+  # setwd("/Users/WooJung/Documents/Rproject/EDPqrl/source")
+  # load(paste0("~/Documents/Rproject/EDPqrl/source/MCMCrestultsN",N,".RData"))
+  library(Rcpp)
+  library(RcppArmadillo)
+  source("EDPqrl_r.R")
+  sourceCpp("EDPqrl_cpp.cpp")
+  nu = c(0, 1, 2, 3)
+  rho = c(0.25, 0.50)
   
-  # nu  rho True_Diff True_Diff.1 True_Diff.2 True_Diff.3
-  # 1  0 0.25    -0.039      -0.078      -0.117      -0.156
-  # 2  0 0.50     0.781       1.562       2.344       3.125
-  # 3  1 0.25     0.958       1.915       2.874       3.833
-  # 4  1 0.50     4.735       9.463      14.195      18.929
-  # 5  2 0.25     1.325       2.651       3.976       5.302
-  # 6  2 0.50     5.975      11.942      17.910      23.882
-  # 7  3 0.25     1.644       3.286       4.928       6.571
-  # 8  3 0.50     6.861      13.708      20.551      27.404
+  esttype = "mean"
+  # esttype = "median"
+  EDPMM_results_POST = SURVIVAL_EDPMM_POST(EDPMM_results_MCMC, M, nu, rho)
+  EDPMM_results_POST$E_rho_nu_diff_result
+  
+  # DPMM_results_POST = SURVIVAL_DPMM_POST(DPMM_results_MCMC, M, nu, rho, esttype)
+  # DPMM_results_POST$E_rho_nu_diff_result
+  
+  nu_vec  = c(0, 1, 2, 3)
+  rho_vec = c(0.25, 0.50)
+  results_list = list()
+  counter = 1
+  for(ii_nu in nu_vec) {
+    for(ii_rho in rho_vec) {
+      Y1_sub = temp_data$Y1[temp_data$Y1 > ii_nu]
+      Y0_sub = temp_data$Y0[temp_data$Y0 > ii_nu]
+      Q1 = if(length(Y1_sub) > 0) unname(quantile(Y1_sub, probs = ii_rho, na.rm = TRUE)) else NA
+      Q0 = if(length(Y0_sub) > 0) unname(quantile(Y0_sub, probs = ii_rho, na.rm = TRUE)) else NA
+      val_diff = Q1 - Q0
+      val_Y1 = Q1 - ii_nu
+      val_Y0 = Q0 - ii_nu
+      results_list[[counter]] = data.frame(
+        nu = ii_nu,
+        rho = ii_rho,
+        diff   = val_diff,
+        res_Y1 = val_Y1,
+        res_Y0 = val_Y0
+      )
+      counter = counter + 1
+    }
+  }
+  temp_data_results = do.call(rbind, results_list)
+  
+  print("temp_data_results")
+  print(temp_data_results)
+  # print("DPMM_results_POST")
+  # print(DPMM_results_POST$E_rho_nu_diff_result)
+  # print(DPMM_results_POST$Y_rho_nu_z1x_result)
+  # print(DPMM_results_POST$Y_rho_nu_z0x_result)
+  print("EDPMM_results_POST")
+  print(EDPMM_results_POST$E_rho_nu_diff_result)
+  # print(EDPMM_results_POST$Y_rho_nu_z1x_result)
+  # print(EDPMM_results_POST$Y_rho_nu_z0x_result)
 }
 
 {
@@ -215,13 +273,13 @@ N = 500
   # ----------------------------------------------------------------------------
   # EDPMM
   # First, check the trace plot of the number of outcome clusters ($K_y$). It
-  # should stabilize around 3 (or slightly higher, like 4 or 5, if it split the
+  # should stabilize around 2 (or slightly higher, like 4 or 5, if it split the
   # non-normal distributions). # Plot the trace of K (Number of Outcome Clusters)
   K_trace = unlist(EDPMM_results_MCMC$MCMCposteriors$KyLists)
-  plot(K_trace, type="s", main="Trace of Ky (Should be >= 3)",
+  plot(K_trace, type="s", main="Trace of Ky (Should be >= 2)",
        xlab="Saved Iteration", ylab="Number of Clusters")
-  abline(h=3, col="red", lwd=2, lty=2) # The Truth
-
+  abline(h=2, col="red", lwd=2, lty=2) # The Truth
+  
   # ----------------------------------------------------------------------------
   # Since the "label switching" problem makes it hard to track "Cluster 1" vs
   # "Cluster 2" over time, the best way to verify is to pool all the intercept
@@ -241,11 +299,11 @@ N = 500
   }
   # Plot the density of all found intercepts
   plot(density(all_intercepts), main="Posterior Density of Intercepts",
-       xlim = c(-7, 7), xlab="Intercept Value", lwd=2, col="blue");par(new=T)
-  plot(density(temp_data$logY), main="", xlim = c(-7, 7))
-  abline(v=c(-3.0, -0.5, 2.0), col="red", lty=2, lwd=2)
+       xlim = c(-5, 5), ylim = c(0, 0.7), xlab="Intercept Value", lwd=2, col="blue");par(new=T)
+  plot(density(temp_data$logY), main="", xlim = c(-5, 5), ylim = c(0, 0.7))
+  abline(v=c(-1.75, 1.375), col="red", lty=2, lwd=2)
   legend("topright", legend=c("Posterior", "Truth"), col=c("blue", "red"), lty=c(1,2))
-
+  
   # ----------------------------------------------------------------------------
   # Check the estimated variances ($\sigma^2$). With your new prior (0.1), these
   # should be very small (close to 0), not stuck at 1.0.
@@ -258,10 +316,10 @@ N = 500
   # Summary
   print(summary(all_sig2))
   # Plot (Log scale to see small values)
-  hist(log10(all_sig2), main="Log10 Variance Posterior",
+  hist(log10(all_sig2), main="Log10 Variance Posterior", xlim=c(-2,1),
        xlab="Log10(Sigma^2)", breaks=30, col="lightgreen")
   # Truth is approx 0.0001 -> Log10 is -4
-  abline(v=-4, col="red", lwd=2)
+  abline(v=c(log10(0.2), log10(0.3)), col="red", lty=2, lwd=2)
   
   # # ----------------------------------------------------------------------------
   # # ----------------------------------------------------------------------------
@@ -294,7 +352,7 @@ N = 500
   # }
   # # Plot the density of all found intercepts
   # plot(density(all_intercepts), main="Posterior Density of Intercepts",
-  #      xlim = c(-7, 7),xlab="Intercept Value", lwd=2, col="blue")
+  #      xlim = c(-7, 7), xlab="Intercept Value", lwd=2, col="blue")
   # abline(v=c(-3.0, -0.5, 2.0), col="red", lty=2, lwd=2)
   # legend("topright", legend=c("Posterior", "Truth"), col=c("blue", "red"), lty=c(1,2))
   # 
@@ -314,59 +372,6 @@ N = 500
   #      xlab="Log10(Sigma^2)", breaks=30, col="lightgreen", xlim = c(-1,1))
   # # Truth is approx 0.0001 -> Log10 is -4
   # abline(v=-4, col="red", lwd=2)
-}
-
-{
-  # setwd("/Users/WooJung/Documents/Rproject/EDPqrl/source")
-  # load(paste0("~/Documents/Rproject/EDPqrl/source/MCMCrestultsN",N,".RData"))
-  source("EDPqrl_r.R")
-  sourceCpp("EDPqrl_cpp.cpp")
-  nu = c(0, 1, 2, 3)
-  rho = c(0.25, 0.50)
-  
-  esttype = "mean"
-  # esttype = "median"
-  EDPMM_results_POST = SURVIVAL_EDPMM_POST(EDPMM_results_MCMC, nu, rho, M, esttype)
-  EDPMM_results_POST$E_rho_nu_diff_result
-  
-  DPMM_results_POST = SURVIVAL_DPMM_POST(DPMM_results_MCMC, nu, rho, M, esttype)
-  DPMM_results_POST$E_rho_nu_diff_result
-  
-  nu_vec  = c(0, 1, 2, 3)
-  rho_vec = c(0.25, 0.50)
-  results_list = list()
-  counter = 1
-  for(ii_nu in nu_vec) {
-    for(ii_rho in rho_vec) {
-      Y1_sub = temp_data$Y1[temp_data$Y1 > ii_nu]
-      Y0_sub = temp_data$Y0[temp_data$Y0 > ii_nu]
-      Q1 = if(length(Y1_sub) > 0) unname(quantile(Y1_sub, probs = ii_rho, na.rm = TRUE)) else NA
-      Q0 = if(length(Y0_sub) > 0) unname(quantile(Y0_sub, probs = ii_rho, na.rm = TRUE)) else NA
-      val_diff = Q1 - Q0
-      val_Y1 = Q1 - ii_nu
-      val_Y0 = Q0 - ii_nu
-      results_list[[counter]] = data.frame(
-        nu = ii_nu,
-        rho = ii_rho,
-        diff   = val_diff,
-        res_Y1 = val_Y1,
-        res_Y0 = val_Y0
-      )
-      counter = counter + 1
-    }
-  }
-  temp_data_results = do.call(rbind, results_list)
-  
-  print("temp_data_results")
-  print(temp_data_results)
-  print("DPMM_results_POST")
-  print(DPMM_results_POST$E_rho_nu_diff_result)
-  # print(DPMM_results_POST$Y_rho_nu_z1x_result)
-  # print(DPMM_results_POST$Y_rho_nu_z0x_result)
-  print("EDPMM_results_POST")
-  print(EDPMM_results_POST$E_rho_nu_diff_result)
-  # print(EDPMM_results_POST$Y_rho_nu_z1x_result)
-  # print(EDPMM_results_POST$Y_rho_nu_z0x_result)
 }
 
 # {
