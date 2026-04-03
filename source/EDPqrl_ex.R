@@ -41,7 +41,7 @@ set.seed(run_ID)
 
 # 
 Scn = 1
-# N = 500
+N = 500
 # N = 1000
 {
   # esttype and saveall
