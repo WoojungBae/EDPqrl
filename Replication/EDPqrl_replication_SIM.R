@@ -34,11 +34,11 @@ SCNs = c(1, 2, 3, 4)
 # Sample size
 Ns = c(500, 1500)
 
-# Supp Resutls for N = 5000 and N = 10000 for scenario 4. 
+# # Supp Resutls for N = 5000 for scenario 4 (80% censoring).
 # # Scenario
 # SCNs = c(4)
 # # Sample size
-# Ns = c(5000, 10000)
+# Ns = c(5000)
 
 for (Scn in SCNs) {
   for (N in Ns) {

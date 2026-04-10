@@ -121,7 +121,7 @@ data-use procedures at [adni.loni.usc.edu](http://adni.loni.usc.edu/).
 
 # Reference
 
-Bae, W., Hong, T., Lee, S. K., Choi, D., and Jeong, J.-H. (2026+).  
+Bae, W., Hong, T., Lee, S. K., Choi, D., and Jeong, J.-H. (2026).  
 *A Bayesian nonparametric approach to causal inference on quantile residual life 
 in observational studies*. arXiv (To be updated.)
 

@@ -1175,9 +1175,36 @@ make_osqc_subcol_table_latex <- function(df, row_vars, table_title, label,
   )
   
   df_latex <- blank_repeats_for_latex(df, row_vars)
-  linesep  <- make_latex_linesep(df, row_vars)
   
-  out_tbl <- kbl(
+  first_data_col <- length(row_vars) + 1
+  data_cols <- names(df_latex)[first_data_col:ncol(df_latex)]
+  
+  # color cells directly by nu block
+  for (j in 1:3) {
+    df_latex[[data_cols[j]]] <- kableExtra::cell_spec(
+      df_latex[[data_cols[j]]],
+      format = "latex",
+      background = "gray!5"
+    )
+  }
+  
+  for (j in 4:6) {
+    df_latex[[data_cols[j]]] <- kableExtra::cell_spec(
+      df_latex[[data_cols[j]]],
+      format = "latex",
+      background = "gray!10"
+    )
+  }
+  
+  for (j in 7:9) {
+    df_latex[[data_cols[j]]] <- kableExtra::cell_spec(
+      df_latex[[data_cols[j]]],
+      format = "latex",
+      background = "gray!15"
+    )
+  }
+  
+  out_tbl <- kableExtra::kbl(
     df_latex,
     format = "latex",
     booktabs = TRUE,
@@ -1186,21 +1213,33 @@ make_osqc_subcol_table_latex <- function(df, row_vars, table_title, label,
     col.names = col_names,
     caption = table_title,
     label = label,
-    linesep = linesep
+    linesep = ""
   ) %>%
-    add_header_above(
+    kableExtra::add_header_above(
       c(" " = length(row_vars), "$\\nu=0$" = 3, "$\\nu=5$" = 3, "$\\nu=10$" = 3),
       escape = FALSE
     ) %>%
-    kable_styling(
+    kableExtra::kable_styling(
       latex_options = c("scale_down"),
       font_size = font_size
     )
   
+  # add only subgroup separators, not row-by-row separators
+  subgroup_vals <- as.character(df[[row_vars[1]]])
+  subgroup_breaks <- which(subgroup_vals[-1] != subgroup_vals[-nrow(df)])
+  
+  if (length(subgroup_breaks) > 0) {
+    for (r in subgroup_breaks) {
+      out_tbl <- out_tbl %>%
+        # kableExtra::row_spec(r, extra_latex_after = "\\midrule\n")
+        kableExtra::row_spec(r, extra_latex_after = "")
+    }
+  }
+  
   out_tbl <- as.character(out_tbl)
   out_tbl <- sub(
     "\\\\begin\\{table\\}",
-    "\\\\begin\\{table\\}[hbp]",
+    "\\\\begin{table}[hbp]",
     out_tbl
   )
   
