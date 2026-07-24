@@ -12,6 +12,8 @@
 *.zip
 *.eps
 
-source/old
+source
 SimulationStudy
 RealDataAnalysis
+OSQC
+.positai

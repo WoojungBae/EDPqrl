@@ -519,6 +519,61 @@ mat rinvwish_cpp(double const& a_PSI, mat const& PSI) {
   return iwishrnd(PSI, a_PSI);
 }
 
+// [[Rcpp::export]]
+mat rmvt_cpp(int const& n, vec const& MU, mat const& SIG, double const& df) {
+  int k = MU.n_elem;
+  
+  // 1. Generate Standard Normals: Z ~ N(0, 1)
+  mat Z = randn(k, n);
+  
+  // 2. Cholesky Decomposition
+  mat U;
+  bool success = chol(U, SIG); 
+  
+  mat X;
+  
+  // 3. Robust Fallback (Only executes if matrix is singular)
+  if (!success) {
+    mat SIG_copy = SIG;
+    SIG_copy.diag() += 1e-8; // Add Jitter
+    
+    if (!chol(U, SIG_copy)) {
+      // Ultimate Fallback: Eigen Decomposition
+      vec eigval; 
+      mat eigvec;
+      eig_sym(eigval, eigvec, SIG);
+      
+      // Force non-negative eigenvalues (remove numerical noise)
+      eigval.elem(find(eigval < 0)).zeros();
+      
+      // Transform to N(0, SIG)
+      X = (eigvec * diagmat(sqrt(eigval))) * Z;
+    } else {
+      X = trans(U) * Z;
+    }
+  } else {
+    // 4. Transform to N(0, SIG)
+    X = trans(U) * Z;
+  }
+  
+  // 5. Scale by Chi-Square to get multivariate t
+  // W ~ chi^2(df), scale = sqrt(df / W)
+  rowvec scale_factors(n);
+  for(int i = 0; i < n; ++i) {
+    double w = R::rchisq(df);
+    scale_factors[i] = std::sqrt(df / w);
+  }
+  
+  // Fast column-wise scaling using Armadillo's each_row()
+  // This multiplies column i by scale_factors[i]
+  X.each_row() %= scale_factors;
+  
+  // 6. Add Mean: X = MU + (Z * scale)
+  X.each_col() += MU;
+  
+  return X;
+}
+
 // =============================================================================
 // GIBBS STEP HELPER FUNCTIONS FOR CLUSTER PARAMETERS
 // =============================================================================
@@ -817,6 +872,9 @@ double S_DPMM_cpp(double const& y, vec const& lambda,
   // }
 }
 
+// =============================================================================
+// OSQC optim
+// =============================================================================
 // [[Rcpp::export]]
 List S_optim_cpp(double const& target, double const& log_nu, // target = {S(nu)} * {1-rho}
                  double const& y_init, double const& y_min, double const& y_max,
@@ -1125,6 +1183,465 @@ List S_optim_cond_cpp(double const& target,
                       _["it"] = it,
                       _["maxit"] = maxit,
                       _["tol"] = tol);
+}
+
+// =============================================================================
+// PSQC optim
+// =============================================================================
+inline double js_logsumexp_vec(const arma::vec& x) {
+  double max_val = x.max();
+  if (std::isinf(max_val) || std::isnan(max_val)) return -INFINITY;
+  return max_val + std::log(arma::sum(arma::exp(x - max_val)));
+}
+
+inline double js_mix_norm_prob_one(double y,
+                                   const arma::mat& lambda_mat,
+                                   const arma::mat& mu_mat,
+                                   const arma::vec& sig,
+                                   int i,
+                                   bool lower_tail) {
+  int K = lambda_mat.n_cols;
+  arma::vec log_terms(K);
+  
+  for (int k = 0; k < K; ++k) {
+    double w = lambda_mat(i, k);
+    
+    if (w <= 0.0 || !std::isfinite(w) ||
+        sig(k) <= 0.0 || !std::isfinite(sig(k))) {
+      log_terms(k) = -INFINITY;
+    } else {
+      double z = (y - mu_mat(i, k)) / sig(k);
+      double log_p = R::pnorm(z, 0.0, 1.0, lower_tail, true);
+      log_terms(k) = std::log(w) + log_p;
+    }
+  }
+  
+  double log_prob = js_logsumexp_vec(log_terms);
+  if (!std::isfinite(log_prob)) return 0.0;
+  
+  double out = std::exp(log_prob);
+  if (out < 0.0) out = 0.0;
+  if (out > 1.0) out = 1.0;
+  
+  return out;
+}
+
+inline double gaussian_copula_core(double u, double v, double rho) {
+  const double eps = 1e-12;
+  
+  if (u <= eps || v <= eps) return 0.0;
+  if (u >= 1.0 - eps) return v;
+  if (v >= 1.0 - eps) return u;
+  
+  u = std::min(std::max(u, eps), 1.0 - eps);
+  v = std::min(std::max(v, eps), 1.0 - eps);
+  rho = std::min(std::max(rho, -0.999999), 0.999999);
+  
+  if (std::abs(rho) < 1e-12) return u * v;
+  if (rho > 0.999) return std::min(u, v);
+  if (rho < -0.999) return std::max(u + v - 1.0, 0.0);
+  
+  static const double nodes[10] = {
+    0.0765265211334973, 0.2277858511416451,
+    0.3737060887154195, 0.5108670019508271,
+    0.6360536807265150, 0.7463319064601508,
+    0.8391169718222188, 0.9122344282513259,
+    0.9639719272779138, 0.9931285991850949
+  };
+  
+  static const double weights[10] = {
+    0.1527533871307258, 0.1491729864726037,
+    0.1420961093183820, 0.1316886384491766,
+    0.1181945319615184, 0.1019301198172404,
+    0.0832767415767048, 0.0626720483341091,
+    0.0406014298003869, 0.0176140071391521
+  };
+  
+  double qv = R::qnorm(v, 0.0, 1.0, true, false);
+  double denom = std::sqrt(1.0 - rho * rho);
+  double half_u = 0.5 * u;
+  double integral = 0.0;
+  
+  for (int j = 0; j < 10; ++j) {
+    double x1 = -nodes[j];
+    double x2 =  nodes[j];
+    
+    double u1 = half_u * (x1 + 1.0);
+    double u2 = half_u * (x2 + 1.0);
+    
+    u1 = std::min(std::max(u1, eps), 1.0 - eps);
+    u2 = std::min(std::max(u2, eps), 1.0 - eps);
+    
+    double q1 = R::qnorm(u1, 0.0, 1.0, true, false);
+    double q2 = R::qnorm(u2, 0.0, 1.0, true, false);
+    
+    double a1 = (qv - rho * q1) / denom;
+    double a2 = (qv - rho * q2) / denom;
+    
+    double f1 = R::pnorm(a1, 0.0, 1.0, true, false);
+    double f2 = R::pnorm(a2, 0.0, 1.0, true, false);
+    
+    integral += weights[j] * (f1 + f2);
+  }
+  
+  double out = half_u * integral;
+  double lower = std::max(u + v - 1.0, 0.0);
+  double upper = std::min(u, v);
+  
+  if (!std::isfinite(out)) out = lower;
+  if (out < lower) out = lower;
+  if (out > upper) out = upper;
+  
+  return out;
+}
+
+inline double pbvn_cdf(double h, double k, double rho) {
+  double u = R::pnorm(h, 0.0, 1.0, true, false);
+  double v = R::pnorm(k, 0.0, 1.0, true, false);
+  return gaussian_copula_core(u, v, rho);
+}
+
+inline double gaussian_copula_cdf(double u, double v, double kappa) {
+  return gaussian_copula_core(u, v, kappa);
+}
+
+// [[Rcpp::export]]
+double jointS_cond_cpp(double const& y0,
+                       double const& y1,
+                       arma::mat const& lambda_z0_mat,
+                       arma::mat const& mu_z0_mat,
+                       arma::mat const& lambda_z1_mat,
+                       arma::mat const& mu_z1_mat,
+                       arma::vec const& sig,
+                       double const& kappa,
+                       bool const& logt) {
+  
+  int M = lambda_z0_mat.n_rows;
+  int K = lambda_z0_mat.n_cols;
+  
+  if (lambda_z0_mat.n_rows != mu_z0_mat.n_rows ||
+      lambda_z0_mat.n_cols != mu_z0_mat.n_cols ||
+      lambda_z1_mat.n_rows != mu_z1_mat.n_rows ||
+      lambda_z1_mat.n_cols != mu_z1_mat.n_cols ||
+      lambda_z1_mat.n_rows != M ||
+      lambda_z1_mat.n_cols != K ||
+      sig.n_elem != static_cast<unsigned int>(K)) {
+    Rcpp::stop("Dimension mismatch in jointS_cond_cpp.");
+  }
+  
+  arma::vec subj_S(M);
+  bool use_independence = (std::abs(kappa) < 1e-12);
+  
+  for (int i = 0; i < M; ++i) {
+    
+    double S0 = js_mix_norm_prob_one(
+      y0,
+      lambda_z0_mat,
+      mu_z0_mat,
+      sig,
+      i,
+      false
+    );
+    
+    double S1 = js_mix_norm_prob_one(
+      y1,
+      lambda_z1_mat,
+      mu_z1_mat,
+      sig,
+      i,
+      false
+    );
+    
+    double joint_S;
+    
+    if (use_independence) {
+      // Cross-world independence benchmark:
+      // P(Y0 > y0, Y1 > y1 | X) = P(Y0 > y0 | X) P(Y1 > y1 | X)
+      joint_S = S0 * S1;
+      
+      if (!std::isfinite(joint_S)) joint_S = 0.0;
+      if (joint_S < 0.0) joint_S = 0.0;
+      if (joint_S > 1.0) joint_S = 1.0;
+      
+    } else {
+      // Gaussian copula sensitivity:
+      // Joint survival = S0 + S1 - 1 + C(F0, F1; kappa)
+      double F0 = js_mix_norm_prob_one(
+        y0,
+        lambda_z0_mat,
+        mu_z0_mat,
+        sig,
+        i,
+        true
+      );
+      
+      double F1 = js_mix_norm_prob_one(
+        y1,
+        lambda_z1_mat,
+        mu_z1_mat,
+        sig,
+        i,
+        true
+      );
+      
+      double cop = gaussian_copula_cdf(F0, F1, kappa);
+      joint_S = S0 + S1 - 1.0 + cop;
+      
+      double lower = std::max(S0 + S1 - 1.0, 0.0);
+      double upper = std::min(S0, S1);
+      
+      if (!std::isfinite(joint_S)) joint_S = lower;
+      if (joint_S < lower) joint_S = lower;
+      if (joint_S > upper) joint_S = upper;
+    }
+    
+    if (logt) {
+      subj_S(i) = (joint_S > 0.0) ? std::log(joint_S) : -INFINITY;
+    } else {
+      subj_S(i) = joint_S;
+    }
+  }
+  
+  if (logt) {
+    double max_S = subj_S.max();
+    
+    if (std::isinf(max_S) || std::isnan(max_S)) {
+      return -INFINITY;
+    } else {
+      return max_S + std::log(arma::sum(arma::exp(subj_S - max_S)) / M);
+    }
+  } else {
+    return arma::mean(subj_S);
+  }
+}
+
+inline double jointS_axis_cond_cpp(double const& y_var,
+                                   double const& y_fixed,
+                                   int const& z_index,
+                                   arma::mat const& lambda_z0_mat,
+                                   arma::mat const& mu_z0_mat,
+                                   arma::mat const& lambda_z1_mat,
+                                   arma::mat const& mu_z1_mat,
+                                   arma::vec const& sig,
+                                   double const& kappa,
+                                   bool const& logt) {
+  
+  if (z_index == 0) {
+    return jointS_cond_cpp(
+      y_var,
+      y_fixed,
+      lambda_z0_mat,
+      mu_z0_mat,
+      lambda_z1_mat,
+      mu_z1_mat,
+      sig,
+      kappa,
+      logt
+    );
+  } else if (z_index == 1) {
+    return jointS_cond_cpp(
+      y_fixed,
+      y_var,
+      lambda_z0_mat,
+      mu_z0_mat,
+      lambda_z1_mat,
+      mu_z1_mat,
+      sig,
+      kappa,
+      logt
+    );
+  } else {
+    Rcpp::stop("z_index must be 0 or 1.");
+  }
+  
+  return NA_REAL;
+}
+
+// [[Rcpp::export]]
+List jointS_optim_cond_cpp(double const& target,
+                           double const& y_init,
+                           double const& y_min,
+                           double const& y_max,
+                           double const& y_fixed,
+                           int const& z_index,
+                           arma::mat const& lambda_z0_mat,
+                           arma::mat const& mu_z0_mat,
+                           arma::mat const& lambda_z1_mat,
+                           arma::mat const& mu_z1_mat,
+                           arma::vec const& sig,
+                           double const& kappa,
+                           bool const& logt) {
+  
+  double y_star = y_init;
+  double y_m    = 0.0;
+  double S_m    = 0.0;
+  double step   = 0.0;
+  
+  double y_u = y_init;
+  double y_l = std::max(y_min, -100.0);
+  
+  double S_u = jointS_axis_cond_cpp(
+    y_u,
+    y_fixed,
+    z_index,
+    lambda_z0_mat,
+    mu_z0_mat,
+    lambda_z1_mat,
+    mu_z1_mat,
+    sig,
+    kappa,
+    logt
+  );
+  
+  double S_l = jointS_axis_cond_cpp(
+    y_l,
+    y_fixed,
+    z_index,
+    lambda_z0_mat,
+    mu_z0_mat,
+    lambda_z1_mat,
+    mu_z1_mat,
+    sig,
+    kappa,
+    logt
+  );
+  
+  if (std::isnan(S_u)) S_u = -INFINITY;
+  if (std::isnan(S_l)) S_l = -INFINITY;
+  
+  bool cond;
+  int it;
+  int maxit = 100000;
+  double tol_S = (logt) ? 1e-4 : 1e-8;
+  double tol_y = (logt) ? 1e-3 : 1e-6;
+  
+  if (!std::isfinite(target)) {
+    return List::create(
+      _["optimizer"] = y_star,
+      _["S_star"]   = -999.0,
+      _["step"]     = -1.0,
+      _["it"]       = -1,
+      _["maxit"]    = maxit,
+      _["tol_S"]    = tol_S,
+      _["tol_y"]    = tol_y
+    );
+  }
+  
+  // ---------------------------------------------------------------------------
+  // Find upper bound: S(y_u) < target
+  // ---------------------------------------------------------------------------
+  cond = (S_u >= target);
+  it = 1;
+  
+  while (cond && it < maxit && y_u < y_max) {
+    y_u += 1.0;
+    
+    S_u = jointS_axis_cond_cpp(
+      y_u,
+      y_fixed,
+      z_index,
+      lambda_z0_mat,
+      mu_z0_mat,
+      lambda_z1_mat,
+      mu_z1_mat,
+      sig,
+      kappa,
+      logt
+    );
+    
+    if (std::isnan(S_u)) S_u = -INFINITY;
+    cond = (S_u >= target);
+    it += 1;
+  }
+  
+  // ---------------------------------------------------------------------------
+  // Find lower bound: S(y_l) > target
+  // ---------------------------------------------------------------------------
+  cond = (S_l <= target);
+  it = 1;
+  
+  while (cond && it < maxit) {
+    y_l -= 1.0;
+    
+    S_l = jointS_axis_cond_cpp(
+      y_l,
+      y_fixed,
+      z_index,
+      lambda_z0_mat,
+      mu_z0_mat,
+      lambda_z1_mat,
+      mu_z1_mat,
+      sig,
+      kappa,
+      logt
+    );
+    
+    if (std::isnan(S_l)) S_l = -INFINITY;
+    cond = (S_l <= target);
+    it += 1;
+  }
+  
+  // ---------------------------------------------------------------------------
+  // Bisection
+  // ---------------------------------------------------------------------------
+  if (S_l > target && S_u < target) {
+    cond = true;
+    it = 1;
+    step = y_u - y_l;
+    
+    while (cond) {
+      y_m = (y_l + y_u) / 2.0;
+      
+      S_m = jointS_axis_cond_cpp(
+        y_m,
+        y_fixed,
+        z_index,
+        lambda_z0_mat,
+        mu_z0_mat,
+        lambda_z1_mat,
+        mu_z1_mat,
+        sig,
+        kappa,
+        logt
+      );
+      
+      if (std::isnan(S_m)) S_m = -INFINITY;
+      
+      if (S_m > target) {
+        y_l = y_m;
+      } else {
+        y_u = y_m;
+      }
+      
+      step /= 2.0;
+      
+      if (std::abs(S_m - target) < tol_S ||
+          step < tol_y ||
+          it > maxit) {
+        cond = false;
+      }
+      
+      it += 1;
+    }
+    
+    y_star = y_m;
+    
+  } else {
+    y_star = y_init;
+    S_m = -999.0;
+    step = -1.0;
+    it = -1;
+  }
+  
+  return List::create(
+    _["optimizer"] = y_star,
+    _["S_star"]   = S_m,
+    _["step"]     = step,
+    _["it"]       = it,
+    _["maxit"]    = maxit,
+    _["tol_S"]    = tol_S,
+    _["tol_y"]    = tol_y
+  );
 }
 
 // =============================================================================

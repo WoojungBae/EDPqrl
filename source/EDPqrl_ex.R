@@ -99,14 +99,15 @@ N = 500
   # temp_data$Xobs[3,1] = NA
   # temp_data$Xobs[2,3] = NA
   # temp_data = generate_data(1, 1e5, 3.20);temp_data$censoring
-  # # TRUE censoring
-  # # Scn1 => cstar = 3.20 # for 20% censoring
-  # # Scn1 => cstar = 2.80 # for 25% censoring
-  # # Scn1 => cstar = 1.79 # for 40% censoring
-  # # Scn1 => cstar = 1.15 # for 50% censoring
-  # # Scn1 => cstar = 0.53 # for 60% censoring
-  # # Scn1 => cstar = -0.52 # for 75% censoring
-  # # Scn1 => cstar = -0.95 # for 80% censoring
+  # temp_data = generate_data(1, 1e5, 3.20, -0.05);mean(temp_data$Zobs)
+  # TRUE censoring
+  # Scn1 => cstar = 3.20 # for 20% censoring
+  # Scn1 => cstar = 2.80 # for 25% censoring
+  # Scn1 => cstar = 1.79 # for 40% censoring
+  # Scn1 => cstar = 1.15 # for 50% censoring
+  # Scn1 => cstar = 0.53 # for 60% censoring
+  # Scn1 => cstar = -0.52 # for 75% censoring
+  # Scn1 => cstar = -0.95 # for 80% censoring
   
   # plot(density(temp_data$logY),xlim=c(-10,10),ylim=c(0,0.4));par(new=TRUE)
   # plot(density(temp_data$logT),xlim=c(-10,10),ylim=c(0,0.3))

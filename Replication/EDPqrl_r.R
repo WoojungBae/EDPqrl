@@ -3,7 +3,7 @@
 # ------------------------------------------------------------------------
 
 # ------------------------------------------------------------------------
-generate_data = function(Scn, n, cstar = NULL) {
+generate_data = function(Scn, n, cstar = NULL, trt_intercept = 0.2) {
   # Covariates: 2 binary and 3 continous covariates
   X1 = rbinom(n, 1, 0.5)
   X2 = rbinom(n, 1, 0.4 + 0.2 * X1)
@@ -13,14 +13,15 @@ generate_data = function(Scn, n, cstar = NULL) {
   # mean: 0.5, 0.5, 0, 0, 0
   X = cbind(X1, X2, X3, X4, X5)
   
-  rowSdX = apply(X, 1, sd)
-  rowMeanX = apply(X, 1, mean)
+  # rowSdX = apply(X, 1, sd)
+  # rowMeanX = apply(X, 1, mean)
   
-  # treatment
+  # treatment (mean: 0.6 or 0.5)
+  # trt_intercept = 0.2 => mean: 0.6
+  # trt_intercept = -0.05 => mean: 0.5
   z0 = 0
   z1 = 1
-  Z = rbinom(n, 1, pnorm(0.2 + 0.1 * X1 + 0.2 * X3 - 0.1 * X5))
-  # mean: 0.6
+  Z = rbinom(n, 1, pnorm(trt_intercept + 0.1 * X1 + 0.2 * X3 - 0.1 * X5))
   
   # design matrix
   matXz0 = cbind(1, z0, X)
@@ -72,10 +73,11 @@ generate_data = function(Scn, n, cstar = NULL) {
   # mixtur weights
   p1 = 0.4
   p2 = 0.6
-  cluster = sapply(1:n, function(l) sample(2, 1, F, c(p1, p2)))
+  cluster0 <- sample(1:2, n, replace = TRUE, prob = c(p1, p2))
+  cluster1 <- sample(1:2, n, replace = TRUE, prob = c(p1, p2))
   
   # TRUE failure time
-  # Scn1 - Scn4 => mixture of truncated normal and truncated t
+  # Scn1 - Scn4 => mixture of t and normal
   logY0 = numeric(n)
   logY1 = numeric(n)
   # # Scn1 => cstar = 3.20 # for 20% censoring
@@ -85,23 +87,35 @@ generate_data = function(Scn, n, cstar = NULL) {
   # # Scn1 => cstar = 0.53 # for 60% censoring
   # # Scn1 => cstar = -0.52 # for 75% censoring
   # # Scn1 => cstar = -0.95 # for 80% censoring
+  logY0 <- ifelse(cluster0 == 1,
+    mean1z0 + sd1 * rt(n, df = df1), rnorm(n, mean2z0, sd2))
+  logY1 <- ifelse(cluster1 == 1,
+    mean1z1 + sd1 * rt(n, df = df1), rnorm(n, mean2z1, sd2))
   # logY0 <- ifelse(cluster == 1,
   #                 mean1z0 + sd1 * rt(n, df = df1),
   #                 mean2z0 + sd2 * rt(n, df = df2))
   # logY1 <- ifelse(cluster == 1,
   #                 mean1z1 + sd1 * rt(n, df = df1),
   #                 mean2z1 + sd2 * rt(n, df = df2))
-  for (i in 1:n) {
-    if (cluster[i] == 1){
-      logY0[i] = c(mean1z0[i] + sd1 * rt(1, df = df1))
-      logY1[i] = c(mean1z1[i] + sd1 * rt(1, df = df1))
-    } else if (cluster[i] == 2) {
-      # logY0[i] = c(rtruncnorm_cpp(1, mean2z0[i], sd2, -5, 5))
-      # logY1[i] = c(rtruncnorm_cpp(1, mean2z1[i], sd2, -5, 5))
-      logY0[i] = c(rnorm(1, mean2z0[i], sd2))
-      logY1[i] = c(rnorm(1, mean2z1[i], sd2))
-    }
-  }
+  # for (i in 1:n) {
+  #   if (cluster[i] == 1){
+  #     rho_y <- 0.1
+  #     Sigma <- sd1^2 * matrix(c(1, rho_y, rho_y, 1), nrow = 2)
+  #     logY01 = rmvt_cpp(1, c(mean1z0[i], mean1z1[i]), Sigma, df1)
+  #     logY0[i] = logY01[1]
+  #     logY1[i] = logY01[2]
+  #     # logY0[i] = c(mean1z0[i] + sd1 * rt(1, df = df1))
+  #     # logY1[i] = c(mean1z1[i] + sd1 * rt(1, df = df1))
+  #   } else if (cluster[i] == 2) {
+  #     rho_y <- 0.3
+  #     Sigma <- sd2^2 * matrix(c(1, rho_y, rho_y, 1), nrow = 2)
+  #     logY01 = rmvn_cpp(1, c(mean2z0[i], mean2z1[i]), Sigma)
+  #     logY0[i] = logY01[1]
+  #     logY1[i] = logY01[2]
+  #     # logY0[i] = c(rnorm(1, mean2z0[i], sd2))
+  #     # logY1[i] = c(rnorm(1, mean2z1[i], sd2))
+  #   }
+  # }
   
   # Scn1 => cstar = 3.20 # for 20% censoring
   # Scn1 => cstar = 2.81 # for 25% censoring
@@ -576,23 +590,41 @@ X_data_augmentation <- function(
   list(matX = matX, scaXobs = scaXobs, sid_vec = sid_vec, Kyx = Kyx)
 }
 
-Y_data_augmentation = function(Tobs, Dobs, matX, S, betaPars, sig2Pars,
-                               location = 0, scale = 1) {
+Y_data_augmentation = function(Tobs, Dobs, Zobs, matX, 
+                               S, betaPars, sig2Pars,
+                               location0 = 0, scale0 = 1, 
+                               location1 = 0, scale1 = 1) {
   N <- length(Tobs)
   Dobs01 <- as.integer(Dobs)
+  Zvec <- as.numeric(Zobs)
+  
   Ysatr <- numeric(N)
   
   # Observed events stay fixed on log-time scale
   Ysatr[Dobs01 == 1L] <- Tobs[Dobs01 == 1L]
+  
   ind_cens <- which(Dobs01 == 0L)
   if (length(ind_cens) == 0L) return(Ysatr)
+  
   for (i in ind_cens) {
     k <- S[i]
-    # cluster-specific mean and sd
-    mu_i  <- sum(matX[i, ] * betaPars[, k] + location)
-    sig_i <- sqrt(scale * sig2Pars[1, k])
     
-    # right-truncated? no: for right-censoring we need Y_i > Tobs[i]
+    # Treatment-specific sensitivity parameters
+    if (Zvec[i] == 0) {
+      loc_i   <- location0
+      scale_i <- scale0
+    } else if (Zvec[i] == 1) {
+      loc_i   <- location1
+      scale_i <- scale1
+    } else {
+      stop("Zobs must be 0 or 1.")
+    }
+    
+    # Cluster-specific mean and sd
+    mu_i  <- sum(matX[i, ] * betaPars[, k]) + loc_i
+    sig_i <- sqrt(scale_i * sig2Pars[1, k])
+    
+    # For right-censoring, latent Y_i must be greater than observed Tobs[i]
     Ysatr[i] <- as.numeric(
       rtruncnorm_cpp(
         n     = 1L,
@@ -613,7 +645,8 @@ Y_data_augmentation = function(Tobs, Dobs, matX, S, betaPars, sig2Pars,
 SURVIVAL_DPMM_MCMC = function(object,
                               gibbs_iter = 1e4, gibbs_burnin = 1e4, gibbs_thin = 1e1, 
                               num_MC = NULL, num_MC_prior = NULL,
-                              location = 0, scale = 1) {
+                              location0 = 0, scale0 = 1, 
+                              location1 = 0, scale1 = 1) {
   # =============================================================================
   # 1. SETUP & INITIALIZATION
   # =============================================================================
@@ -784,12 +817,19 @@ SURVIVAL_DPMM_MCMC = function(object,
   betaPars = sapply(1:K, function(k) rmvn_cpp(1, a_beta, sig2Pars[k] * B_beta))
   
   # ... (Initialize latent log-times y, y*) ...
-  # Ysatr = Y_data_augmentation(Tobs, Dobs, matX, S,
-  #                             a_beta, Binv_beta, aBinv_beta,
-  #                             a_sig2, b_sig2,
-  #                             inv_cpp, rtrunct_cpp,
-  #                             upper = Inf)
-  Ysatr = Y_data_augmentation(Tobs, Dobs, matX, S, betaPars, sig2Pars)
+  Ysatr = Y_data_augmentation(
+    Tobs = Tobs,
+    Dobs = Dobs,
+    Zobs = Zobs,
+    matX = matX,
+    S = S,
+    betaPars = betaPars,
+    sig2Pars = sig2Pars,
+    location0 = location0,
+    scale0 = scale0,
+    location1 = location1,
+    scale1 = scale1
+  )
   
   # --- Initialize propensity parameters (eta) ---
   etaPars = matrix(nrow = p_Z, ncol = K)
@@ -935,12 +975,19 @@ SURVIVAL_DPMM_MCMC = function(object,
     # End update of cluster membership --------------------------------------------
     
     # Update of cluster-specific parameters for confounders---------------------
-    # Ysatr = Y_data_augmentation(Tobs, Dobs, matX, S,
-    #                             a_beta, Binv_beta, aBinv_beta,
-    #                             a_sig2, b_sig2,
-    #                             inv_cpp, rtrunct_cpp,
-    #                             upper = Inf)
-    Ysatr = Y_data_augmentation(Tobs, Dobs, matX, S, betaPars, sig2Pars)
+    Ysatr = Y_data_augmentation(
+      Tobs = Tobs,
+      Dobs = Dobs,
+      Zobs = Zobs,
+      matX = matX,
+      S = S,
+      betaPars = betaPars,
+      sig2Pars = sig2Pars,
+      location0 = location0,
+      scale0 = scale0,
+      location1 = location1,
+      scale1 = scale1
+    )
     
     # Missing covariates augmentation (DPMM specific single-cluster logic)
     if (has_missing_X) {
@@ -1093,15 +1140,17 @@ SURVIVAL_DPMM_MCMC = function(object,
 
 # -----------------------------------------------------------------------------
 # Define function for the post-processing under the BNP (DPMM) model
-SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL, 
+SURVIVAL_DPMM_POST = function(object, M, nu, rho, 
+                              kappa = NULL, 
+                              psi_z0 = NULL, psi_z1 = NULL, 
                               condX = NULL, p_condX = NULL, esttype = "mean",
                               level = NULL) {
   
   # -----------------------------------------------------------------------------
   # object = DPMM_results_MCMC
-  # condX = vector of values to condition on (e.g., c(1)), NULL for marginal
+  # condX = vector of values to condition on, NULL for marginal
   # p_condX = vector of column indices in the X matrix for condX, NULL for marginal
-  # eta_z0, eta_z1 = vectors of sensitivity shift parameters
+  # psi_z0, psi_z1 = vectors of sensitivity shift parameters
   # -----------------------------------------------------------------------------
   
   logSumExp = function(vals) {
@@ -1121,6 +1170,7 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
       probs_shifted[zero_rows, ] = 1 / ncol(log_prob_matrix)
       row_sums[zero_rows] = 1
     }
+    
     probs_shifted / row_sums
   }
   
@@ -1133,17 +1183,18 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
   n_rho = length(rho_vec)
   
   eta_grid = expand.grid(
-    eta_z0 = if (is.null(eta_z0)) 0 else as.vector(eta_z0),
-    eta_z1 = if (is.null(eta_z1)) 0 else as.vector(eta_z1)
+    psi_z0 = if (is.null(psi_z0)) 0 else as.vector(psi_z0),
+    psi_z1 = if (is.null(psi_z1)) 0 else as.vector(psi_z1)
   )
-  eta_z0_vec = eta_grid$eta_z0
-  eta_z1_vec = eta_grid$eta_z1
+  psi_z0_vec = eta_grid$psi_z0
+  psi_z1_vec = eta_grid$psi_z1
   n_eta = nrow(eta_grid)
   
   if (is.null(level)) {
-    level = 0.05  
+    level = 0.05
   }
   quantile_alpha = c(level / 2, 1 - level / 2)
+  
   z0 = 0
   z1 = 1
   
@@ -1171,7 +1222,6 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
   
   # -----------------------------------------------------------------------------
   # Transform condX to the scaled space used in MCMC
-  # p_condX indexes columns of X = (binary first, then continuous)
   # -----------------------------------------------------------------------------
   if (!is.null(condX) && !is.null(p_condX)) {
     if (length(condX) != length(p_condX)) {
@@ -1182,12 +1232,14 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
     
     if (p_X2 > 0) {
       is_cont <- p_condX > p_X1
+      
       if (any(is_cont)) {
         q_idx <- p_condX[is_cont] - p_X1
         
         if (is.null(con_center) || is.null(con_scale)) {
           stop("con_center and con_scale must be available for continuous condX.")
         }
+        
         if (any(q_idx < 1 | q_idx > length(con_center))) {
           stop("Continuous indices in p_condX are out of range.")
         }
@@ -1205,6 +1257,23 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
   Y_rho_nu_z0x_store = array(NA_real_, dim = c(n_MCMC, n_eta, n_nu, n_rho))
   Y_rho_nu_z1x_store = array(NA_real_, dim = c(n_MCMC, n_eta, n_nu, n_rho))
   
+  if (is.null(kappa)) {
+    kappa_vec <- rep(0, n_MCMC)
+  } else if (is.character(kappa) && length(kappa) == 1 && kappa == "unif01") {
+    kappa_vec <- runif(n_MCMC, 0, 1)
+  } else if (is.character(kappa) && length(kappa) == 1 && kappa == "unifm11") {
+    kappa_vec <- runif(n_MCMC, -1, 1)
+  } else if (is.numeric(kappa) && length(kappa) == 1) {
+    kappa_vec <- rep(kappa, n_MCMC)
+  } else if (is.numeric(kappa) && length(kappa) == n_MCMC) {
+    kappa_vec <- kappa
+  } else {
+    stop("kappa must be NULL, 'unif01', 'unifm11', a numeric scalar, or a numeric vector of length n_MCMC.")
+  }
+  
+  # -----------------------------------------------------------------------------
+  # Posterior predictive loop
+  # -----------------------------------------------------------------------------
   for (post_reps in 1:n_MCMC) {
     
     # ---------------------------------------------------------------------------
@@ -1221,8 +1290,7 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
     tau2Pars = object$MCMCposteriors$tau2Lists[[post_reps]]
     
     # ---------------------------------------------------------------------------
-    # Build augmented parameter objects:
-    #   existing clusters + one new cluster
+    # Build augmented parameter objects
     # ---------------------------------------------------------------------------
     sig2_new = as.numeric(rscainvchisq_cpp(1, a_sig2, b_sig2))
     beta_new = as.vector(rmvn_cpp(1, a_beta, sig2_new * B_beta))
@@ -1267,8 +1335,8 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
           a_tau_half * log(ab_tau)
       }
       
-      # prior predictive for condX under the base measure
       log_base_condX = 0
+      
       for (i in seq_along(p_condX)) {
         idx = p_condX[i]
         val = condX[i]
@@ -1286,6 +1354,7 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
       
       for (k in 1:K) {
         ll = 0
+        
         for (i in seq_along(p_condX)) {
           idx = p_condX[i]
           val = condX[i]
@@ -1297,15 +1366,18 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
             ll = ll + dnorm(val, muPars[q, k], sqrt(tau2Pars[q, k]), log = TRUE)
           }
         }
+        
         log_lambda_x_mc[k] = log(n_k[k]) + ll
       }
       
       log_lambda_x_mc[K + 1L] = log(alpha) + log_base_condX
       
       max_ll_x = max(log_lambda_x_mc, na.rm = TRUE)
+      
       if (!is.finite(max_ll_x)) {
         stop("All entries of log_lambda_x_mc are -Inf. Check condX/prior predictive.")
       }
+      
       lambda_x_mc = exp(log_lambda_x_mc - max_ll_x)
       
     } else {
@@ -1334,6 +1406,7 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
     for (k in 1:K_mc) {
       ind_S_x_mc = which(S_x_mc == k)
       n_k_temp = length(ind_S_x_mc)
+      
       if (n_k_temp == 0) next
       
       if (p_X1 > 0) {
@@ -1347,6 +1420,7 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
       if (p_X2 > 0) {
         for (q in 1:p_X2) {
           col_idx = p_X1 + q
+          
           if (is.null(p_condX) || !(col_idx %in% p_condX)) {
             X_mc[ind_S_x_mc, col_idx] = rnorm(
               n_k_temp,
@@ -1359,12 +1433,13 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
     }
     
     # ---------------------------------------------------------------------------
-    # Calculate logf0_x0_mc and logf0_x1_mc
+    # Calculate base covariate density
     # ---------------------------------------------------------------------------
     ab_tau <- a_tau2 * b_tau2
     a_tau_new <- (a_tau2 + 1) / 2
     a_tau_half <- a_tau2 / 2
     b_mu_ratio <- b_mu / (b_mu + 1)
+    
     margin_part1_mc <- lgamma(a_tau_new) - lgamma(a_tau_half) +
       0.5 * log(b_mu_ratio / pi) +
       a_tau_half * log(ab_tau)
@@ -1393,8 +1468,10 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
     # Build outcome mixture on realized support only
     # ---------------------------------------------------------------------------
     K_aug = K + 2
+    
     sig2_new = as.numeric(rscainvchisq_cpp(1, a_sig2, b_sig2))
     beta_new = as.vector(rmvn_cpp(1, a_beta, sig2_new * B_beta))
+    
     betaPars_mc = cbind(betaPars_mc, beta_new)
     sig2Pars_mc = c(sig2Pars_mc, sig2_new)
     
@@ -1410,12 +1487,14 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
       prob_z1_mc = dbinom(z1, 1, etaPars_mc[, k], log = TRUE)
       
       prob_x_mc = numeric(M)
+      
       if (p_X1 > 0) {
         for (q in 1:p_X1) {
           prob_x_mc = prob_x_mc +
             dbinom(X_mc[, q], 1, piPars_mc[q, k], log = TRUE)
         }
       }
+      
       if (p_X2 > 0) {
         for (q in 1:p_X2) {
           prob_x_mc = prob_x_mc +
@@ -1443,73 +1522,98 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
     # ---------------------------------------------------------------------------
     matX_z0x_mc = cbind(1, z0, X_mc)
     matX_z1x_mc = cbind(1, z1, X_mc)
+    
     MUy_z0x_mc = matX_z0x_mc %*% betaPars_mc
     MUy_z1x_mc = matX_z1x_mc %*% betaPars_mc
     
     sig_mc = as.vector(sqrt(sig2Pars_mc))
     
     # ---------------------------------------------------------------------------
-    # Sensitivity / optimization loops
+    # Sensitivity / optimization loops for PSQC
     # ---------------------------------------------------------------------------
+    curr_kappa = kappa_vec[post_reps]
+    
     for (ii_eta in 1:n_eta) {
-      curr_eta_z0 = eta_z0_vec[ii_eta]
-      curr_eta_z1 = eta_z1_vec[ii_eta]
+      curr_psi_z0 = psi_z0_vec[ii_eta]
+      curr_psi_z1 = psi_z1_vec[ii_eta]
       
       for (ii_nu in 1:n_nu) {
         curr_nu = nu_vec[ii_nu]
         curr_log_nu = log(curr_nu)
         safe_curr_log_nu = ifelse(curr_nu == 0, -100, curr_log_nu)
         
-        run_z0 = (curr_nu - curr_eta_z0 >= 0)
-        run_z1 = (curr_nu - curr_eta_z1 >= 0)
+        run_z0 = (curr_nu - curr_psi_z0 >= 0)
+        run_z1 = (curr_nu - curr_psi_z1 >= 0)
+        run_ps = (run_z0 && run_z1)
         
-        if (run_z0) {
-          S_nu_z0x = S_cond_cpp(
-            safe_curr_log_nu - curr_eta_z0,
-            lambda_Y_z0x_mc, MUy_z0x_mc, sig_mc, TRUE
-          )
-        }
+        if (!run_ps) next
         
-        if (run_z1) {
-          S_nu_z1x = S_cond_cpp(
-            safe_curr_log_nu - curr_eta_z1,
-            lambda_Y_z1x_mc, MUy_z1x_mc, sig_mc, TRUE
-          )
-        }
+        y0_nu = safe_curr_log_nu - curr_psi_z0
+        y1_nu = safe_curr_log_nu - curr_psi_z1
+        
+        log_den = jointS_cond_cpp(
+          y0 = y0_nu,
+          y1 = y1_nu,
+          lambda_z0_mat = lambda_Y_z0x_mc,
+          mu_z0_mat = MUy_z0x_mc,
+          lambda_z1_mat = lambda_Y_z1x_mc,
+          mu_z1_mat = MUy_z1x_mc,
+          sig = sig_mc,
+          kappa = curr_kappa,
+          logt = TRUE
+        )
+        
+        if (!is.finite(log_den)) next
         
         for (ii_rho in 1:n_rho) {
           curr_rho = rho_vec[ii_rho]
           
-          if (run_z0) {
-            target_rho_nu_z0x = S_nu_z0x + log(1 - curr_rho)
-            opt_z0 <- S_optim_cond_cpp(
-              target = target_rho_nu_z0x,
-              y_init = safe_curr_log_nu - curr_eta_z0 + 0.1,
-              y_min = safe_curr_log_nu - curr_eta_z0,
-              y_max = 100,
-              lambda_mat = lambda_Y_z0x_mc,
-              mu_mat = MUy_z0x_mc,
-              sig = sig_mc,
-              logt = TRUE
-            )
+          if (curr_rho <= 0 || curr_rho >= 1) next
+          
+          target_rho_nu = log_den + log(1 - curr_rho)
+          
+          if (!is.finite(target_rho_nu)) next
+          
+          opt_z0 <- jointS_optim_cond_cpp(
+            target = target_rho_nu,
+            y_init = y0_nu + 0.1,
+            y_min = y0_nu,
+            y_max = 100,
+            y_fixed = y1_nu,
+            z_index = 0,
+            lambda_z0_mat = lambda_Y_z0x_mc,
+            mu_z0_mat = MUy_z0x_mc,
+            lambda_z1_mat = lambda_Y_z1x_mc,
+            mu_z1_mat = MUy_z1x_mc,
+            sig = sig_mc,
+            kappa = curr_kappa,
+            logt = TRUE
+          )
+          
+          if (!is.null(opt_z0$it) && opt_z0$it > 0 && is.finite(opt_z0$optimizer)) {
             Y_rho_nu_z0x_store[post_reps, ii_eta, ii_nu, ii_rho] =
-              exp(opt_z0$optimizer + curr_eta_z0) - curr_nu
+              exp(opt_z0$optimizer + curr_psi_z0) - curr_nu
           }
           
-          if (run_z1) {
-            target_rho_nu_z1x = S_nu_z1x + log(1 - curr_rho)
-            opt_z1 <- S_optim_cond_cpp(
-              target = target_rho_nu_z1x,
-              y_init = safe_curr_log_nu - curr_eta_z1 + 0.1,
-              y_min = safe_curr_log_nu - curr_eta_z1,
-              y_max = 100,
-              lambda_mat = lambda_Y_z1x_mc,
-              mu_mat = MUy_z1x_mc,
-              sig = sig_mc,
-              logt = TRUE
-            )
+          opt_z1 <- jointS_optim_cond_cpp(
+            target = target_rho_nu,
+            y_init = y1_nu + 0.1,
+            y_min = y1_nu,
+            y_max = 100,
+            y_fixed = y0_nu,
+            z_index = 1,
+            lambda_z0_mat = lambda_Y_z0x_mc,
+            mu_z0_mat = MUy_z0x_mc,
+            lambda_z1_mat = lambda_Y_z1x_mc,
+            mu_z1_mat = MUy_z1x_mc,
+            sig = sig_mc,
+            kappa = curr_kappa,
+            logt = TRUE
+          )
+          
+          if (!is.null(opt_z1$it) && opt_z1$it > 0 && is.finite(opt_z1$optimizer)) {
             Y_rho_nu_z1x_store[post_reps, ii_eta, ii_nu, ii_rho] =
-              exp(opt_z1$optimizer + curr_eta_z1) - curr_nu
+              exp(opt_z1$optimizer + curr_psi_z1) - curr_nu
           }
         }
       }
@@ -1531,8 +1635,8 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
   counter = 1L
   
   for (ii_eta in 1:n_eta) {
-    val_eta_z0 = eta_z0_vec[ii_eta]
-    val_eta_z1 = eta_z1_vec[ii_eta]
+    val_psi_z0 = psi_z0_vec[ii_eta]
+    val_psi_z1 = psi_z1_vec[ii_eta]
     
     for (ii_nu in 1:n_nu) {
       val_nu = nu_vec[ii_nu]
@@ -1546,21 +1650,21 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
         
         if (!all(is.na(draws_z0))) {
           summ_z0 = POSTsummary(draws_z0, esttype, quantile_alpha)
-          summ_z0 = cbind(eta_z0 = val_eta_z0, nu = val_nu, rho = val_rho, summ_z0)
+          summ_z0 = cbind(psi_z0 = val_psi_z0, nu = val_nu, rho = val_rho, summ_z0)
           z0_tables_list[[counter]] = summ_z0
         }
         
         if (!all(is.na(draws_z1))) {
           summ_z1 = POSTsummary(draws_z1, esttype, quantile_alpha)
-          summ_z1 = cbind(eta_z1 = val_eta_z1, nu = val_nu, rho = val_rho, summ_z1)
+          summ_z1 = cbind(psi_z1 = val_psi_z1, nu = val_nu, rho = val_rho, summ_z1)
           z1_tables_list[[counter]] = summ_z1
         }
         
         if (!all(is.na(draws_diff))) {
           summ_diff = POSTsummary(draws_diff, esttype, quantile_alpha)
           summ_diff = cbind(
-            eta_z0 = val_eta_z0,
-            eta_z1 = val_eta_z1,
+            psi_z0 = val_psi_z0,
+            psi_z1 = val_psi_z1,
             nu = val_nu,
             rho = val_rho,
             summ_diff
@@ -1573,9 +1677,23 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
     }
   }
   
-  Y_rho_nu_z0x_result  = if (length(z0_tables_list) > 0) do.call(rbind, z0_tables_list) else NULL
-  Y_rho_nu_z1x_result  = if (length(z1_tables_list) > 0) do.call(rbind, z1_tables_list) else NULL
-  E_rho_nu_diff_result = if (length(diff_tables_list) > 0) do.call(rbind, diff_tables_list) else NULL
+  Y_rho_nu_z0x_result = if (length(z0_tables_list) > 0) {
+    do.call(rbind, z0_tables_list)
+  } else {
+    NULL
+  }
+  
+  Y_rho_nu_z1x_result = if (length(z1_tables_list) > 0) {
+    do.call(rbind, z1_tables_list)
+  } else {
+    NULL
+  }
+  
+  E_rho_nu_diff_result = if (length(diff_tables_list) > 0) {
+    do.call(rbind, diff_tables_list)
+  } else {
+    NULL
+  }
   
   POSTresult = list(
     Y_rho_nu_z0x_result  = Y_rho_nu_z0x_result,
@@ -1583,14 +1701,16 @@ SURVIVAL_DPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
     E_rho_nu_diff_result = E_rho_nu_diff_result,
     Y_rho_nu_z0x_store   = Y_rho_nu_z0x_store,
     Y_rho_nu_z1x_store   = Y_rho_nu_z1x_store,
-    E_rho_nu_diff_store  = E_rho_nu_diff_store
+    E_rho_nu_diff_store  = E_rho_nu_diff_store,
+    kappa_vec            = kappa_vec
   )
   
   return(POSTresult)
 }
 
 SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
-                                       eta_z0 = NULL, eta_z1 = NULL,
+                                       kappa = NULL, 
+                                       psi_z0 = NULL, psi_z1 = NULL,
                                        condX = NULL, p_condX = NULL,
                                        esttype = "mean",
                                        level = NULL,
@@ -1600,6 +1720,10 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
   # Parallel version of SURVIVAL_DPMM_POST
   # Uses mclapply() on macOS/Linux; falls back to serial on Windows or ncores <= 1
   # -----------------------------------------------------------------------------
+  
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
   
   if (.Platform$OS.type == "windows" || ncores <= 1L) {
     if (.Platform$OS.type == "windows") {
@@ -1613,11 +1737,13 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
         M        = M,
         nu       = nu,
         rho      = rho,
-        eta_z0   = eta_z0,
-        eta_z1   = eta_z1,
+        kappa    = kappa,
+        psi_z0   = psi_z0,
+        psi_z1   = psi_z1,
         condX    = condX,
         p_condX  = p_condX,
-        esttype  = esttype
+        esttype  = esttype,
+        level    = level
       )
     )
   }
@@ -1651,19 +1777,20 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
   n_rho = length(rho_vec)
   
   eta_grid = expand.grid(
-    eta_z0 = if (is.null(eta_z0)) 0 else as.vector(eta_z0),
-    eta_z1 = if (is.null(eta_z1)) 0 else as.vector(eta_z1),
+    psi_z0 = if (is.null(psi_z0)) 0 else as.vector(psi_z0),
+    psi_z1 = if (is.null(psi_z1)) 0 else as.vector(psi_z1),
     KEEP.OUT.ATTRS = FALSE,
     stringsAsFactors = FALSE
   )
-  eta_z0_vec = eta_grid$eta_z0
-  eta_z1_vec = eta_grid$eta_z1
+  psi_z0_vec = eta_grid$psi_z0
+  psi_z1_vec = eta_grid$psi_z1
   n_eta = nrow(eta_grid)
   
   if (is.null(level)) {
     level = 0.05  
   }
   quantile_alpha = c(level / 2, 1 - level / 2)
+  
   z0 = 0
   z1 = 1
   
@@ -1688,6 +1815,23 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
   p_Z = 1
   con_center = object$constants$con_center
   con_scale = object$constants$con_scale
+  
+  # -----------------------------------------------------------------------------
+  # Kappa draws
+  # -----------------------------------------------------------------------------
+  if (is.null(kappa)) {
+    kappa_vec <- rep(0, n_MCMC)
+  } else if (is.character(kappa) && length(kappa) == 1 && kappa == "unif01") {
+    kappa_vec <- runif(n_MCMC, 0, 1)
+  } else if (is.character(kappa) && length(kappa) == 1 && kappa == "unifm11") {
+    kappa_vec <- runif(n_MCMC, -1, 1)
+  } else if (is.numeric(kappa) && length(kappa) == 1) {
+    kappa_vec <- rep(kappa, n_MCMC)
+  } else if (is.numeric(kappa) && length(kappa) == n_MCMC) {
+    kappa_vec <- kappa
+  } else {
+    stop("kappa must be NULL, 'unif01', 'unifm11', a numeric scalar, or a numeric vector of length n_MCMC.")
+  }
   
   # -----------------------------------------------------------------------------
   # Transform condX to the scaled space used in MCMC
@@ -1785,7 +1929,6 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
           a_tau_half * log(ab_tau)
       }
       
-      # prior predictive for condX under the base measure
       log_base_condX = 0
       for (i in seq_along(p_condX)) {
         idx = p_condX[i]
@@ -1804,6 +1947,7 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
       
       for (k in 1:K) {
         ll = 0
+        
         for (i in seq_along(p_condX)) {
           idx = p_condX[i]
           val = condX[i]
@@ -1815,6 +1959,7 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
             ll = ll + dnorm(val, muPars[q, k], sqrt(tau2Pars[q, k]), log = TRUE)
           }
         }
+        
         log_lambda_x_mc[k] = log(n_k[k]) + ll
       }
       
@@ -1928,12 +2073,14 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
       prob_z1_mc = dbinom(z1, 1, etaPars_mc[, k], log = TRUE)
       
       prob_x_mc = numeric(M)
+      
       if (p_X1 > 0) {
         for (q in 1:p_X1) {
           prob_x_mc = prob_x_mc +
             dbinom(X_mc[, q], 1, piPars_mc[q, k], log = TRUE)
         }
       }
+      
       if (p_X2 > 0) {
         for (q in 1:p_X2) {
           prob_x_mc = prob_x_mc +
@@ -1967,67 +2114,91 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
     sig_mc = as.vector(sqrt(sig2Pars_mc))
     
     # ---------------------------------------------------------------------------
-    # Sensitivity / optimization loops
+    # Sensitivity / optimization loops for PSQC
     # ---------------------------------------------------------------------------
+    curr_kappa = kappa_vec[post_reps]
+    
     for (ii_eta in seq_len(n_eta)) {
-      curr_eta_z0 = eta_z0_vec[ii_eta]
-      curr_eta_z1 = eta_z1_vec[ii_eta]
+      curr_psi_z0 = psi_z0_vec[ii_eta]
+      curr_psi_z1 = psi_z1_vec[ii_eta]
       
       for (ii_nu in seq_len(n_nu)) {
         curr_nu = nu_vec[ii_nu]
         curr_log_nu = log(curr_nu)
         safe_curr_log_nu = ifelse(curr_nu == 0, -100, curr_log_nu)
         
-        run_z0 = (curr_nu - curr_eta_z0 >= 0)
-        run_z1 = (curr_nu - curr_eta_z1 >= 0)
+        run_z0 = (curr_nu - curr_psi_z0 >= 0)
+        run_z1 = (curr_nu - curr_psi_z1 >= 0)
+        run_ps = (run_z0 && run_z1)
         
-        if (run_z0) {
-          S_nu_z0x = S_cond_cpp(
-            safe_curr_log_nu - curr_eta_z0,
-            lambda_Y_z0x_mc, MUy_z0x_mc, sig_mc, TRUE
-          )
-        }
+        if (!run_ps) next
         
-        if (run_z1) {
-          S_nu_z1x = S_cond_cpp(
-            safe_curr_log_nu - curr_eta_z1,
-            lambda_Y_z1x_mc, MUy_z1x_mc, sig_mc, TRUE
-          )
-        }
+        y0_nu = safe_curr_log_nu - curr_psi_z0
+        y1_nu = safe_curr_log_nu - curr_psi_z1
+        
+        log_den = jointS_cond_cpp(
+          y0 = y0_nu,
+          y1 = y1_nu,
+          lambda_z0_mat = lambda_Y_z0x_mc,
+          mu_z0_mat = MUy_z0x_mc,
+          lambda_z1_mat = lambda_Y_z1x_mc,
+          mu_z1_mat = MUy_z1x_mc,
+          sig = sig_mc,
+          kappa = curr_kappa,
+          logt = TRUE
+        )
+        
+        if (!is.finite(log_den)) next
         
         for (ii_rho in seq_len(n_rho)) {
           curr_rho = rho_vec[ii_rho]
           
-          if (run_z0) {
-            target_rho_nu_z0x = S_nu_z0x + log(1 - curr_rho)
-            opt_z0 <- S_optim_cond_cpp(
-              target = target_rho_nu_z0x,
-              y_init = safe_curr_log_nu - curr_eta_z0 + 0.1,
-              y_min = safe_curr_log_nu - curr_eta_z0,
-              y_max = 100,
-              lambda_mat = lambda_Y_z0x_mc,
-              mu_mat = MUy_z0x_mc,
-              sig = sig_mc,
-              logt = TRUE
-            )
+          if (curr_rho <= 0 || curr_rho >= 1) next
+          
+          target_rho_nu = log_den + log(1 - curr_rho)
+          
+          if (!is.finite(target_rho_nu)) next
+          
+          opt_z0 <- jointS_optim_cond_cpp(
+            target = target_rho_nu,
+            y_init = y0_nu + 0.1,
+            y_min = y0_nu,
+            y_max = 100,
+            y_fixed = y1_nu,
+            z_index = 0,
+            lambda_z0_mat = lambda_Y_z0x_mc,
+            mu_z0_mat = MUy_z0x_mc,
+            lambda_z1_mat = lambda_Y_z1x_mc,
+            mu_z1_mat = MUy_z1x_mc,
+            sig = sig_mc,
+            kappa = curr_kappa,
+            logt = TRUE
+          )
+          
+          if (!is.null(opt_z0$it) && opt_z0$it > 0 && is.finite(opt_z0$optimizer)) {
             Y_rho_nu_z0x_local[ii_eta, ii_nu, ii_rho] =
-              exp(opt_z0$optimizer + curr_eta_z0) - curr_nu
+              exp(opt_z0$optimizer + curr_psi_z0) - curr_nu
           }
           
-          if (run_z1) {
-            target_rho_nu_z1x = S_nu_z1x + log(1 - curr_rho)
-            opt_z1 <- S_optim_cond_cpp(
-              target = target_rho_nu_z1x,
-              y_init = safe_curr_log_nu - curr_eta_z1 + 0.1,
-              y_min = safe_curr_log_nu - curr_eta_z1,
-              y_max = 100,
-              lambda_mat = lambda_Y_z1x_mc,
-              mu_mat = MUy_z1x_mc,
-              sig = sig_mc,
-              logt = TRUE
-            )
+          opt_z1 <- jointS_optim_cond_cpp(
+            target = target_rho_nu,
+            y_init = y1_nu + 0.1,
+            y_min = y1_nu,
+            y_max = 100,
+            y_fixed = y0_nu,
+            z_index = 1,
+            lambda_z0_mat = lambda_Y_z0x_mc,
+            mu_z0_mat = MUy_z0x_mc,
+            lambda_z1_mat = lambda_Y_z1x_mc,
+            mu_z1_mat = MUy_z1x_mc,
+            sig = sig_mc,
+            kappa = curr_kappa,
+            logt = TRUE
+          )
+          
+          if (!is.null(opt_z1$it) && opt_z1$it > 0 && is.finite(opt_z1$optimizer)) {
             Y_rho_nu_z1x_local[ii_eta, ii_nu, ii_rho] =
-              exp(opt_z1$optimizer + curr_eta_z1) - curr_nu
+              exp(opt_z1$optimizer + curr_psi_z1) - curr_nu
           }
         }
       }
@@ -2047,8 +2218,6 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
       }
     )
   }
-  
-  if (!is.null(seed)) set.seed(seed)
   
   start_time <- Sys.time()
   print(start_time)
@@ -2092,8 +2261,8 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
   counter = 1L
   
   for (ii_eta in seq_len(n_eta)) {
-    val_eta_z0 = eta_z0_vec[ii_eta]
-    val_eta_z1 = eta_z1_vec[ii_eta]
+    val_psi_z0 = psi_z0_vec[ii_eta]
+    val_psi_z1 = psi_z1_vec[ii_eta]
     
     for (ii_nu in seq_len(n_nu)) {
       val_nu = nu_vec[ii_nu]
@@ -2107,21 +2276,21 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
         
         if (!all(is.na(draws_z0))) {
           summ_z0 = POSTsummary(draws_z0, esttype, quantile_alpha)
-          summ_z0 = cbind(eta_z0 = val_eta_z0, nu = val_nu, rho = val_rho, summ_z0)
+          summ_z0 = cbind(psi_z0 = val_psi_z0, nu = val_nu, rho = val_rho, summ_z0)
           z0_tables_list[[counter]] = summ_z0
         }
         
         if (!all(is.na(draws_z1))) {
           summ_z1 = POSTsummary(draws_z1, esttype, quantile_alpha)
-          summ_z1 = cbind(eta_z1 = val_eta_z1, nu = val_nu, rho = val_rho, summ_z1)
+          summ_z1 = cbind(psi_z1 = val_psi_z1, nu = val_nu, rho = val_rho, summ_z1)
           z1_tables_list[[counter]] = summ_z1
         }
         
         if (!all(is.na(draws_diff))) {
           summ_diff = POSTsummary(draws_diff, esttype, quantile_alpha)
           summ_diff = cbind(
-            eta_z0 = val_eta_z0,
-            eta_z1 = val_eta_z1,
+            psi_z0 = val_psi_z0,
+            psi_z1 = val_psi_z1,
             nu = val_nu,
             rho = val_rho,
             summ_diff
@@ -2144,7 +2313,8 @@ SURVIVAL_DPMM_POST_parallel = function(object, M, nu, rho,
     E_rho_nu_diff_result = E_rho_nu_diff_result,
     Y_rho_nu_z0x_store   = Y_rho_nu_z0x_store,
     Y_rho_nu_z1x_store   = Y_rho_nu_z1x_store,
-    E_rho_nu_diff_store  = E_rho_nu_diff_store
+    E_rho_nu_diff_store  = E_rho_nu_diff_store,
+    kappa_vec            = kappa_vec
   )
   
   return(POSTresult)
@@ -2499,20 +2669,39 @@ SURVIVAL_DPMM_POST_ftn = function(object, M, t_grid, ftn = c("S", "f"),
 }
 
 # ------------------------------------------------------------------------
-SURVIVAL_DPMM = function(object, M = 2e3, nu = 0, rho = 0.5, 
+SURVIVAL_DPMM = function(object, M = 2e3, nu = 0, rho = 0.5, kappa = NULL, 
                          gibbs_iter = 2e4, gibbs_burnin = 2e4, gibbs_thin = 1e2, 
                          esttype = "mean", saveall = FALSE, level = NULL,
-                         location = 0, scale = 1){
+                         location0 = 0, scale0 = 1, 
+                         location1 = 0, scale1 = 1) {
   # object = temp_data
-  MCMCresult = SURVIVAL_DPMM_MCMC(object, gibbs_iter, gibbs_burnin, gibbs_thin,
-                                  location = 0, scale = 1)
-  POSTresult = SURVIVAL_DPMM_POST(MCMCresult, M, nu, rho, 
-                                  esttype = esttype, level = level)
-  if (isTRUE(saveall)){
+  MCMCresult = SURVIVAL_DPMM_MCMC(
+    object,
+    gibbs_iter = gibbs_iter,
+    gibbs_burnin = gibbs_burnin,
+    gibbs_thin = gibbs_thin,
+    location0 = location0,
+    scale0 = scale0,
+    location1 = location1,
+    scale1 = scale1
+  )
+  
+  POSTresult = SURVIVAL_DPMM_POST(
+    MCMCresult,
+    M = M,
+    nu = nu,
+    rho = rho,
+    kappa = kappa,
+    esttype = esttype,
+    level = level
+  )
+  
+  if (isTRUE(saveall)) {
     result = c(MCMCresult, POSTresult)
   } else {
     result = POSTresult
   }
+  
   return(result)
 }
 
@@ -2522,7 +2711,8 @@ SURVIVAL_DPMM = function(object, M = 2e3, nu = 0, rho = 0.5,
 SURVIVAL_EDPMM_MCMC = function(object,
                                gibbs_iter = 1e4, gibbs_burnin = 1e4, gibbs_thin = 1e1, 
                                num_MC = NULL, num_MC_prior = NULL,
-                               location = 0, scale = 1) {
+                               location0 = 0, scale0 = 1, 
+                               location1 = 0, scale1 = 1) {
   # =============================================================================
   # 1. SETUP & INITIALIZATION
   # =============================================================================
@@ -2721,12 +2911,19 @@ SURVIVAL_EDPMM_MCMC = function(object,
   betaPars = sapply(1:Ky, function(k) rmvn_cpp(1, a_beta, sig2Pars[k] * B_beta))
   
   # ... (Initialize latent log-times y, y*) ...
-  # Ysatr = Y_data_augmentation(Tobs, Dobs, matX, Sy,
-  #                             a_beta, Binv_beta, aBinv_beta,
-  #                             a_sig2, b_sig2,
-  #                             inv_cpp, rtrunct_cpp,
-  #                             upper = Inf)
-  Ysatr = Y_data_augmentation(Tobs, Dobs, matX, Sy, betaPars, sig2Pars)
+  Ysatr = Y_data_augmentation(
+    Tobs = Tobs,
+    Dobs = Dobs,
+    Zobs = Zobs,
+    matX = matX,
+    S = Sy,
+    betaPars = betaPars,
+    sig2Pars = sig2Pars,
+    location0 = location0,
+    scale0 = scale0,
+    location1 = location1,
+    scale1 = scale1
+  )
   
   for (k in unique_Sy) {
     ind_S = which(Sy == k)
@@ -2961,12 +3158,19 @@ SURVIVAL_EDPMM_MCMC = function(object,
     
     # Update of cluster-specific parameters for confounders---------------------
     # ... (Initialize latent log-times y, y*) ...
-    # Ysatr = Y_data_augmentation(Tobs, Dobs, matX, Sy,
-    #                             a_beta, Binv_beta, aBinv_beta,
-    #                             a_sig2, b_sig2,
-    #                             inv_cpp, rtrunct_cpp,
-    #                             upper = Inf)
-    Ysatr = Y_data_augmentation(Tobs, Dobs, matX, Sy, betaPars, sig2Pars)
+    Ysatr = Y_data_augmentation(
+      Tobs = Tobs,
+      Dobs = Dobs,
+      Zobs = Zobs,
+      matX = matX,
+      S = Sy,
+      betaPars = betaPars,
+      sig2Pars = sig2Pars,
+      location0 = location0,
+      scale0 = scale0,
+      location1 = location1,
+      scale1 = scale1
+    )
     
     # If no missing covariates, do nothing
     if (has_missing_X) {
@@ -3174,14 +3378,16 @@ SURVIVAL_EDPMM_MCMC = function(object,
 
 # -----------------------------------------------------------------------------
 # Define function for the post-processing under the BNP (EDPMM) model
-SURVIVAL_EDPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL, 
-                               condX = NULL, p_condX = NULL, esttype = "mean",
-                               level = NULL) {
+SURVIVAL_EDPMM_POST = function(object, M, nu, rho, 
+                               kappa = NULL, 
+                               psi_z0 = NULL, psi_z1 = NULL, 
+                               condX = NULL, p_condX = NULL, 
+                               esttype = "mean", level = NULL) {
   # -----------------------------------------------------------------------------
   # object = EDPMM_results_MCMC
   # condX = vector of values to condition on (e.g., c(1)), NULL for marginal
   # p_condX = vector of column indices in the X matrix for condX, NULL for marginal
-  # eta_z0, eta_z1 = vectors of sensitivity shift parameters
+  # psi_z0, psi_z1 = vectors of sensitivity shift parameters
   # -----------------------------------------------------------------------------
   
   logSumExp = function(vals) {
@@ -3213,11 +3419,11 @@ SURVIVAL_EDPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
   n_rho = length(rho_vec)
   
   eta_grid = expand.grid(
-    eta_z0 = if (is.null(eta_z0)) 0 else as.vector(eta_z0),
-    eta_z1 = if (is.null(eta_z1)) 0 else as.vector(eta_z1)
+    psi_z0 = if (is.null(psi_z0)) 0 else as.vector(psi_z0),
+    psi_z1 = if (is.null(psi_z1)) 0 else as.vector(psi_z1)
   )
-  eta_z0_vec = eta_grid$eta_z0
-  eta_z1_vec = eta_grid$eta_z1
+  psi_z0_vec = eta_grid$psi_z0
+  psi_z1_vec = eta_grid$psi_z1
   n_eta = nrow(eta_grid)
   
   if (is.null(level)) {
@@ -3284,6 +3490,20 @@ SURVIVAL_EDPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
   
   Y_rho_nu_z0x_store = array(NA_real_, dim = c(n_MCMC, n_eta, n_nu, n_rho))
   Y_rho_nu_z1x_store = array(NA_real_, dim = c(n_MCMC, n_eta, n_nu, n_rho))
+  
+  if (is.null(kappa)) {
+    kappa_vec <- rep(0, n_MCMC)
+  } else if (is.character(kappa) && length(kappa) == 1 && kappa == "unif01") {
+    kappa_vec <- runif(n_MCMC, 0, 1)
+  } else if (is.character(kappa) && length(kappa) == 1 && kappa == "unifm11") {
+    kappa_vec <- runif(n_MCMC, -1, 1)
+  } else if (is.numeric(kappa) && length(kappa) == 1) {
+    kappa_vec <- rep(kappa, n_MCMC)
+  } else if (is.numeric(kappa) && length(kappa) == n_MCMC) {
+    kappa_vec <- kappa
+  } else {
+    stop("kappa must be NULL, 'unif01', 'unifm11', a numeric scalar, or a numeric vector of length n_MCMC.")
+  }
   
   for (post_reps in 1:n_MCMC) {
     
@@ -3657,65 +3877,90 @@ SURVIVAL_EDPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
     # ---------------------------------------------------------------------------
     # Sensitivity / optimization loops
     # ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # Sensitivity / optimization loops for PSQC
+    # ---------------------------------------------------------------------------
+    curr_kappa = kappa_vec[post_reps]
+    
     for (ii_eta in 1:n_eta) {
-      curr_eta_z0 = eta_z0_vec[ii_eta]
-      curr_eta_z1 = eta_z1_vec[ii_eta]
+      curr_psi_z0 = psi_z0_vec[ii_eta]
+      curr_psi_z1 = psi_z1_vec[ii_eta]
       
       for (ii_nu in 1:n_nu) {
         curr_nu = nu_vec[ii_nu]
         curr_log_nu = log(curr_nu)
         safe_curr_log_nu = ifelse(curr_nu == 0, -100, curr_log_nu)
         
-        run_z0 = (curr_nu - curr_eta_z0 >= 0)
-        run_z1 = (curr_nu - curr_eta_z1 >= 0)
+        run_z0 = (curr_nu - curr_psi_z0 >= 0)
+        run_z1 = (curr_nu - curr_psi_z1 >= 0)
+        run_ps = (run_z0 && run_z1)
         
-        if (run_z0) {
-          S_nu_z0x = S_cond_cpp(
-            safe_curr_log_nu - curr_eta_z0,
-            lambda_Y_z0x_mc, MUy_z0x_mc, sig_mc, TRUE
-          )
-        }
+        if (!run_ps) next
         
-        if (run_z1) {
-          S_nu_z1x = S_cond_cpp(
-            safe_curr_log_nu - curr_eta_z1,
-            lambda_Y_z1x_mc, MUy_z1x_mc, sig_mc, TRUE
-          )
-        }
+        y0_nu = safe_curr_log_nu - curr_psi_z0
+        y1_nu = safe_curr_log_nu - curr_psi_z1
+        
+        log_den = jointS_cond_cpp(
+          y0 = y0_nu,
+          y1 = y1_nu,
+          lambda_z0_mat = lambda_Y_z0x_mc,
+          mu_z0_mat = MUy_z0x_mc,
+          lambda_z1_mat = lambda_Y_z1x_mc,
+          mu_z1_mat = MUy_z1x_mc,
+          sig = sig_mc,
+          kappa = curr_kappa,
+          logt = TRUE
+        )
+        
+        if (!is.finite(log_den)) next
         
         for (ii_rho in 1:n_rho) {
           curr_rho = rho_vec[ii_rho]
+          if (curr_rho <= 0 || curr_rho >= 1) next
           
-          if (run_z0) {
-            target_rho_nu_z0x = S_nu_z0x + log(1 - curr_rho)
-            opt_z0 <- S_optim_cond_cpp(
-              target = target_rho_nu_z0x,
-              y_init = safe_curr_log_nu - curr_eta_z0 + 0.1,
-              y_min = safe_curr_log_nu - curr_eta_z0,
-              y_max = 100,
-              lambda_mat = lambda_Y_z0x_mc,
-              mu_mat = MUy_z0x_mc,
-              sig = sig_mc,
-              logt = TRUE
-            )
+          target_rho_nu = log_den + log(1 - curr_rho)
+          if (!is.finite(target_rho_nu)) next
+          
+          opt_z0 <- jointS_optim_cond_cpp(
+            target = target_rho_nu,
+            y_init = y0_nu + 0.1,
+            y_min = y0_nu,
+            y_max = 100,
+            y_fixed = y1_nu,
+            z_index = 0,
+            lambda_z0_mat = lambda_Y_z0x_mc,
+            mu_z0_mat = MUy_z0x_mc,
+            lambda_z1_mat = lambda_Y_z1x_mc,
+            mu_z1_mat = MUy_z1x_mc,
+            sig = sig_mc,
+            kappa = curr_kappa,
+            logt = TRUE
+          )
+          
+          if (!is.null(opt_z0$it) && opt_z0$it > 0 && is.finite(opt_z0$optimizer)) {
             Y_rho_nu_z0x_store[post_reps, ii_eta, ii_nu, ii_rho] =
-              exp(opt_z0$optimizer + curr_eta_z0) - curr_nu
+              exp(opt_z0$optimizer + curr_psi_z0) - curr_nu
           }
           
-          if (run_z1) {
-            target_rho_nu_z1x = S_nu_z1x + log(1 - curr_rho)
-            opt_z1 <- S_optim_cond_cpp(
-              target = target_rho_nu_z1x,
-              y_init = safe_curr_log_nu - curr_eta_z1 + 0.1,
-              y_min = safe_curr_log_nu - curr_eta_z1,
-              y_max = 100,
-              lambda_mat = lambda_Y_z1x_mc,
-              mu_mat = MUy_z1x_mc,
-              sig = sig_mc,
-              logt = TRUE
-            )
+          opt_z1 <- jointS_optim_cond_cpp(
+            target = target_rho_nu,
+            y_init = y1_nu + 0.1,
+            y_min = y1_nu,
+            y_max = 100,
+            y_fixed = y0_nu,
+            z_index = 1,
+            lambda_z0_mat = lambda_Y_z0x_mc,
+            mu_z0_mat = MUy_z0x_mc,
+            lambda_z1_mat = lambda_Y_z1x_mc,
+            mu_z1_mat = MUy_z1x_mc,
+            sig = sig_mc,
+            kappa = curr_kappa,
+            logt = TRUE
+          )
+          
+          if (!is.null(opt_z1$it) && opt_z1$it > 0 && is.finite(opt_z1$optimizer)) {
             Y_rho_nu_z1x_store[post_reps, ii_eta, ii_nu, ii_rho] =
-              exp(opt_z1$optimizer + curr_eta_z1) - curr_nu
+              exp(opt_z1$optimizer + curr_psi_z1) - curr_nu
           }
         }
       }
@@ -3737,8 +3982,8 @@ SURVIVAL_EDPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
   counter = 1L
   
   for (ii_eta in 1:n_eta) {
-    val_eta_z0 = eta_z0_vec[ii_eta]
-    val_eta_z1 = eta_z1_vec[ii_eta]
+    val_psi_z0 = psi_z0_vec[ii_eta]
+    val_psi_z1 = psi_z1_vec[ii_eta]
     
     for (ii_nu in 1:n_nu) {
       val_nu = nu_vec[ii_nu]
@@ -3752,21 +3997,21 @@ SURVIVAL_EDPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
         
         if (!all(is.na(draws_z0))) {
           summ_z0 = POSTsummary(draws_z0, esttype, quantile_alpha)
-          summ_z0 = cbind(eta_z0 = val_eta_z0, nu = val_nu, rho = val_rho, summ_z0)
+          summ_z0 = cbind(psi_z0 = val_psi_z0, nu = val_nu, rho = val_rho, summ_z0)
           z0_tables_list[[counter]] = summ_z0
         }
         
         if (!all(is.na(draws_z1))) {
           summ_z1 = POSTsummary(draws_z1, esttype, quantile_alpha)
-          summ_z1 = cbind(eta_z1 = val_eta_z1, nu = val_nu, rho = val_rho, summ_z1)
+          summ_z1 = cbind(psi_z1 = val_psi_z1, nu = val_nu, rho = val_rho, summ_z1)
           z1_tables_list[[counter]] = summ_z1
         }
         
         if (!all(is.na(draws_diff))) {
           summ_diff = POSTsummary(draws_diff, esttype, quantile_alpha)
           summ_diff = cbind(
-            eta_z0 = val_eta_z0,
-            eta_z1 = val_eta_z1,
+            psi_z0 = val_psi_z0,
+            psi_z1 = val_psi_z1,
             nu = val_nu,
             rho = val_rho,
             summ_diff
@@ -3789,14 +4034,16 @@ SURVIVAL_EDPMM_POST = function(object, M, nu, rho, eta_z0 = NULL, eta_z1 = NULL,
     E_rho_nu_diff_result = E_rho_nu_diff_result,
     Y_rho_nu_z0x_store   = Y_rho_nu_z0x_store,
     Y_rho_nu_z1x_store   = Y_rho_nu_z1x_store,
-    E_rho_nu_diff_store  = E_rho_nu_diff_store
+    E_rho_nu_diff_store  = E_rho_nu_diff_store,
+    kappa_vec            = kappa_vec
   )
   
   return(POSTresult)
 }
 
 SURVIVAL_EDPMM_POST_parallel = function(object, M, nu, rho,
-                                        eta_z0 = NULL, eta_z1 = NULL,
+                                        kappa = NULL, 
+                                        psi_z0 = NULL, psi_z1 = NULL,
                                         condX = NULL, p_condX = NULL,
                                         esttype = "mean",
                                         level = NULL,
@@ -3809,6 +4056,10 @@ SURVIVAL_EDPMM_POST_parallel = function(object, M, nu, rho,
   
   if (.Platform$OS.type == "windows") {
     stop("This version uses parallel::mclapply() and is intended for macOS/Linux.")
+  }
+  
+  if (!is.null(seed)) {
+    set.seed(seed)
   }
   
   logSumExp = function(vals) {
@@ -3840,13 +4091,13 @@ SURVIVAL_EDPMM_POST_parallel = function(object, M, nu, rho,
   n_rho = length(rho_vec)
   
   eta_grid = expand.grid(
-    eta_z0 = if (is.null(eta_z0)) 0 else as.vector(eta_z0),
-    eta_z1 = if (is.null(eta_z1)) 0 else as.vector(eta_z1),
+    psi_z0 = if (is.null(psi_z0)) 0 else as.vector(psi_z0),
+    psi_z1 = if (is.null(psi_z1)) 0 else as.vector(psi_z1),
     KEEP.OUT.ATTRS = FALSE,
     stringsAsFactors = FALSE
   )
-  eta_z0_vec = eta_grid$eta_z0
-  eta_z1_vec = eta_grid$eta_z1
+  psi_z0_vec = eta_grid$psi_z0
+  psi_z1_vec = eta_grid$psi_z1
   n_eta = nrow(eta_grid)
   
   if (is.null(level)) {
@@ -3877,6 +4128,23 @@ SURVIVAL_EDPMM_POST_parallel = function(object, M, nu, rho,
   p_Z = 1
   con_center = object$constants$con_center
   con_scale = object$constants$con_scale
+  
+  # -----------------------------------------------------------------------------
+  # Kappa draws
+  # -----------------------------------------------------------------------------
+  if (is.null(kappa)) {
+    kappa_vec <- rep(0, n_MCMC)
+  } else if (is.character(kappa) && length(kappa) == 1 && kappa == "unif01") {
+    kappa_vec <- runif(n_MCMC, 0, 1)
+  } else if (is.character(kappa) && length(kappa) == 1 && kappa == "unifm11") {
+    kappa_vec <- runif(n_MCMC, -1, 1)
+  } else if (is.numeric(kappa) && length(kappa) == 1) {
+    kappa_vec <- rep(kappa, n_MCMC)
+  } else if (is.numeric(kappa) && length(kappa) == n_MCMC) {
+    kappa_vec <- kappa
+  } else {
+    stop("kappa must be NULL, 'unif01', 'unifm11', a numeric scalar, or a numeric vector of length n_MCMC.")
+  }
   
   # -----------------------------------------------------------------------------
   # Transform condX to the scaled space used in MCMC
@@ -4263,67 +4531,91 @@ SURVIVAL_EDPMM_POST_parallel = function(object, M, nu, rho,
     sig_mc = as.vector(sqrt(sig2Pars_mc))
     
     # ---------------------------------------------------------------------------
-    # Sensitivity / optimization loops
+    # Sensitivity / optimization loops for PSQC
     # ---------------------------------------------------------------------------
+    curr_kappa = kappa_vec[post_reps]
+    
     for (ii_eta in 1:n_eta) {
-      curr_eta_z0 = eta_z0_vec[ii_eta]
-      curr_eta_z1 = eta_z1_vec[ii_eta]
+      curr_psi_z0 = psi_z0_vec[ii_eta]
+      curr_psi_z1 = psi_z1_vec[ii_eta]
       
       for (ii_nu in 1:n_nu) {
         curr_nu = nu_vec[ii_nu]
         curr_log_nu = log(curr_nu)
         safe_curr_log_nu = ifelse(curr_nu == 0, -100, curr_log_nu)
         
-        run_z0 = (curr_nu - curr_eta_z0 >= 0)
-        run_z1 = (curr_nu - curr_eta_z1 >= 0)
+        run_z0 = (curr_nu - curr_psi_z0 >= 0)
+        run_z1 = (curr_nu - curr_psi_z1 >= 0)
+        run_ps = (run_z0 && run_z1)
         
-        if (run_z0) {
-          S_nu_z0x = S_cond_cpp(
-            safe_curr_log_nu - curr_eta_z0,
-            lambda_Y_z0x_mc, MUy_z0x_mc, sig_mc, TRUE
-          )
-        }
+        if (!run_ps) next
         
-        if (run_z1) {
-          S_nu_z1x = S_cond_cpp(
-            safe_curr_log_nu - curr_eta_z1,
-            lambda_Y_z1x_mc, MUy_z1x_mc, sig_mc, TRUE
-          )
-        }
+        y0_nu = safe_curr_log_nu - curr_psi_z0
+        y1_nu = safe_curr_log_nu - curr_psi_z1
+        
+        log_den = jointS_cond_cpp(
+          y0 = y0_nu,
+          y1 = y1_nu,
+          lambda_z0_mat = lambda_Y_z0x_mc,
+          mu_z0_mat = MUy_z0x_mc,
+          lambda_z1_mat = lambda_Y_z1x_mc,
+          mu_z1_mat = MUy_z1x_mc,
+          sig = sig_mc,
+          kappa = curr_kappa,
+          logt = TRUE
+        )
+        
+        if (!is.finite(log_den)) next
         
         for (ii_rho in 1:n_rho) {
           curr_rho = rho_vec[ii_rho]
           
-          if (run_z0) {
-            target_rho_nu_z0x = S_nu_z0x + log(1 - curr_rho)
-            opt_z0 <- S_optim_cond_cpp(
-              target = target_rho_nu_z0x,
-              y_init = safe_curr_log_nu - curr_eta_z0 + 0.1,
-              y_min = safe_curr_log_nu - curr_eta_z0,
-              y_max = 100,
-              lambda_mat = lambda_Y_z0x_mc,
-              mu_mat = MUy_z0x_mc,
-              sig = sig_mc,
-              logt = TRUE
-            )
+          if (curr_rho <= 0 || curr_rho >= 1) next
+          
+          target_rho_nu = log_den + log(1 - curr_rho)
+          
+          if (!is.finite(target_rho_nu)) next
+          
+          opt_z0 <- jointS_optim_cond_cpp(
+            target = target_rho_nu,
+            y_init = y0_nu + 0.1,
+            y_min = y0_nu,
+            y_max = 100,
+            y_fixed = y1_nu,
+            z_index = 0,
+            lambda_z0_mat = lambda_Y_z0x_mc,
+            mu_z0_mat = MUy_z0x_mc,
+            lambda_z1_mat = lambda_Y_z1x_mc,
+            mu_z1_mat = MUy_z1x_mc,
+            sig = sig_mc,
+            kappa = curr_kappa,
+            logt = TRUE
+          )
+          
+          if (!is.null(opt_z0$it) && opt_z0$it > 0 && is.finite(opt_z0$optimizer)) {
             Y_rho_nu_z0x_local[ii_eta, ii_nu, ii_rho] =
-              exp(opt_z0$optimizer + curr_eta_z0) - curr_nu
+              exp(opt_z0$optimizer + curr_psi_z0) - curr_nu
           }
           
-          if (run_z1) {
-            target_rho_nu_z1x = S_nu_z1x + log(1 - curr_rho)
-            opt_z1 <- S_optim_cond_cpp(
-              target = target_rho_nu_z1x,
-              y_init = safe_curr_log_nu - curr_eta_z1 + 0.1,
-              y_min = safe_curr_log_nu - curr_eta_z1,
-              y_max = 100,
-              lambda_mat = lambda_Y_z1x_mc,
-              mu_mat = MUy_z1x_mc,
-              sig = sig_mc,
-              logt = TRUE
-            )
+          opt_z1 <- jointS_optim_cond_cpp(
+            target = target_rho_nu,
+            y_init = y1_nu + 0.1,
+            y_min = y1_nu,
+            y_max = 100,
+            y_fixed = y0_nu,
+            z_index = 1,
+            lambda_z0_mat = lambda_Y_z0x_mc,
+            mu_z0_mat = MUy_z0x_mc,
+            lambda_z1_mat = lambda_Y_z1x_mc,
+            mu_z1_mat = MUy_z1x_mc,
+            sig = sig_mc,
+            kappa = curr_kappa,
+            logt = TRUE
+          )
+          
+          if (!is.null(opt_z1$it) && opt_z1$it > 0 && is.finite(opt_z1$optimizer)) {
             Y_rho_nu_z1x_local[ii_eta, ii_nu, ii_rho] =
-              exp(opt_z1$optimizer + curr_eta_z1) - curr_nu
+              exp(opt_z1$optimizer + curr_psi_z1) - curr_nu
           }
         }
       }
@@ -4347,8 +4639,6 @@ SURVIVAL_EDPMM_POST_parallel = function(object, M, nu, rho,
   # -----------------------------------------------------------------------------
   # Parallel execution
   # -----------------------------------------------------------------------------
-  if (!is.null(seed)) set.seed(seed)
-  
   start_time <- Sys.time()
   print(start_time)
   
@@ -4391,8 +4681,8 @@ SURVIVAL_EDPMM_POST_parallel = function(object, M, nu, rho,
   counter = 1L
   
   for (ii_eta in seq_len(n_eta)) {
-    val_eta_z0 = eta_z0_vec[ii_eta]
-    val_eta_z1 = eta_z1_vec[ii_eta]
+    val_psi_z0 = psi_z0_vec[ii_eta]
+    val_psi_z1 = psi_z1_vec[ii_eta]
     
     for (ii_nu in seq_len(n_nu)) {
       val_nu = nu_vec[ii_nu]
@@ -4406,21 +4696,21 @@ SURVIVAL_EDPMM_POST_parallel = function(object, M, nu, rho,
         
         if (!all(is.na(draws_z0))) {
           summ_z0 = POSTsummary(draws_z0, esttype, quantile_alpha)
-          summ_z0 = cbind(eta_z0 = val_eta_z0, nu = val_nu, rho = val_rho, summ_z0)
+          summ_z0 = cbind(psi_z0 = val_psi_z0, nu = val_nu, rho = val_rho, summ_z0)
           z0_tables_list[[counter]] = summ_z0
         }
         
         if (!all(is.na(draws_z1))) {
           summ_z1 = POSTsummary(draws_z1, esttype, quantile_alpha)
-          summ_z1 = cbind(eta_z1 = val_eta_z1, nu = val_nu, rho = val_rho, summ_z1)
+          summ_z1 = cbind(psi_z1 = val_psi_z1, nu = val_nu, rho = val_rho, summ_z1)
           z1_tables_list[[counter]] = summ_z1
         }
         
         if (!all(is.na(draws_diff))) {
           summ_diff = POSTsummary(draws_diff, esttype, quantile_alpha)
           summ_diff = cbind(
-            eta_z0 = val_eta_z0,
-            eta_z1 = val_eta_z1,
+            psi_z0 = val_psi_z0,
+            psi_z1 = val_psi_z1,
             nu = val_nu,
             rho = val_rho,
             summ_diff
@@ -4443,7 +4733,8 @@ SURVIVAL_EDPMM_POST_parallel = function(object, M, nu, rho,
     E_rho_nu_diff_result = E_rho_nu_diff_result,
     Y_rho_nu_z0x_store   = Y_rho_nu_z0x_store,
     Y_rho_nu_z1x_store   = Y_rho_nu_z1x_store,
-    E_rho_nu_diff_store  = E_rho_nu_diff_store
+    E_rho_nu_diff_store  = E_rho_nu_diff_store,
+    kappa_vec            = kappa_vec
   )
   
   return(POSTresult)
@@ -4990,20 +5281,39 @@ SURVIVAL_EDPMM_POST_ftn = function(object, M, t_grid, ftn = c("S", "f"),
 }
 
 # ------------------------------------------------------------------------
-SURVIVAL_EDPMM = function(object, M = 2e3, nu = 0, rho = 0.5, 
+SURVIVAL_EDPMM = function(object, M = 2e3, nu = 0, rho = 0.5, kappa = NULL, 
                           gibbs_iter = 2e4, gibbs_burnin = 2e4, gibbs_thin = 1e2, 
                           esttype = "mean", saveall = FALSE, level = NULL,
-                          location = 0, scale = 1){
+                          location0 = 0, scale0 = 1, 
+                          location1 = 0, scale1 = 1) {
   # object = temp_data
-  MCMCresult = SURVIVAL_EDPMM_MCMC(object, gibbs_iter, gibbs_burnin, gibbs_thin,
-                                   location = 0, scale = 1)
-  POSTresult = SURVIVAL_EDPMM_POST(MCMCresult, M, nu, rho, 
-                                   esttype = esttype, level = level)
-  if (isTRUE(saveall)){
+  MCMCresult = SURVIVAL_EDPMM_MCMC(
+    object,
+    gibbs_iter = gibbs_iter,
+    gibbs_burnin = gibbs_burnin,
+    gibbs_thin = gibbs_thin,
+    location0 = location0,
+    scale0 = scale0,
+    location1 = location1,
+    scale1 = scale1
+  )
+  
+  POSTresult = SURVIVAL_EDPMM_POST(
+    MCMCresult,
+    M = M,
+    nu = nu,
+    rho = rho,
+    kappa = kappa,
+    esttype = esttype,
+    level = level
+  )
+  
+  if (isTRUE(saveall)) {
     result = c(MCMCresult, POSTresult)
   } else {
     result = POSTresult
   }
+  
   return(result)
 }
 
